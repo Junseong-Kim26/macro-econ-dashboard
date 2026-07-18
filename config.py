@@ -286,4 +286,23 @@ COMBO_CHARTS = [
              "kind": "line", "axis": "right", "color": "#2ca02c"},
         ],
     },
+    {
+        "key": "usdkrw",
+        "title": "원/달러 환율",
+        "left_title": "원/달러 (₩)",
+        "series": [
+            {"label": "원/달러", "source": "fred", "id": "DEXKOUS",
+             "kind": "line", "axis": "left", "color": "#d62728"},
+        ],
+    },
+    {
+        "key": "yield_spread",
+        "title": "미국 장단기 금리차 (10년 - 2년)",
+        "left_title": "금리차 (%p)",
+        "zero_line": True,  # 0선(수익률곡선 역전 기준) 표시
+        "series": [
+            {"label": "10Y-2Y 금리차", "source": "fred", "id": "T10Y2Y",
+             "kind": "line", "axis": "left", "color": "#9467bd"},
+        ],
+    },
 ]

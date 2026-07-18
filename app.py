@@ -167,7 +167,7 @@ for start in range(0, len(results), PER_ROW):
 # 탭: 그래프 / 시장지수(콤보) / 테이블 / 점수 기준
 # ---------------------------------------------------------------------------
 tab_graph, tab_combo, tab_table, tab_rule = st.tabs(
-    ["📈 그래프", "📈 시장지수(콤보)", "📋 일별 테이블", "📖 점수 기준"]
+    ["📈 그래프", "📈 시장·환율·금리차", "📋 일별 테이블", "📖 점수 기준"]
 )
 
 # 기간 필터
@@ -229,12 +229,17 @@ with tab_combo:
         )
         fig.update_yaxes(title_text=chart.get("left_title", ""), secondary_y=False)
         fig.update_yaxes(title_text=chart.get("right_title", ""), secondary_y=True)
+        if chart.get("zero_line"):
+            fig.add_hline(y=0, line_dash="dash", line_color="gray",
+                          annotation_text="0 (수익률곡선 역전 기준)",
+                          annotation_position="bottom right")
         st.plotly_chart(fig, use_container_width=True)
 
     st.caption(
-        "나스닥·다우존스는 왼쪽 축(선), IPO ETF는 오른쪽 축(선)입니다. "
-        "지수와 ETF는 스케일이 달라 축을 나눠 표시합니다. "
-        "이 지표들은 참고용 그래프이며 종합점수에는 반영되지 않습니다."
+        "· 증시지수 콤보: 나스닥·다우존스(왼쪽 축, 선), IPO ETF(오른쪽 축, 선). "
+        "지수와 ETF는 스케일이 달라 축을 나눠 표시합니다.\n\n"
+        "· 장단기 금리차가 **0 아래(역전)**면 경기침체 경고 신호로 해석됩니다.\n\n"
+        "· 이 지표들은 참고용 그래프이며 종합점수에는 반영되지 않습니다."
     )
 
 with tab_table:
