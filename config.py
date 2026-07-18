@@ -259,3 +259,31 @@ def get_variable(key):
         if v["key"] == key:
             return v
     raise KeyError(f"알 수 없는 변수 key: {key}")
+
+
+# ---------------------------------------------------------------------------
+# 콤보 차트 정의 (점수화하지 않고 '그래프'만 표시하는 시장지표)
+# ---------------------------------------------------------------------------
+# 각 series 항목:
+#   label  : 범례에 표시할 이름
+#   source : 'fred' | 'yfinance' | 'stooq'
+#   id     : 시리즈/티커 코드
+#   kind   : 'line' | 'bar'  (콤보: 서로 다른 종류를 섞음)
+#   axis   : 'left' | 'right' (스케일이 다르면 오른쪽 보조축)
+#   color  : 선/막대 색
+COMBO_CHARTS = [
+    {
+        "key": "market_combo",
+        "title": "미국 증시지수 & IPO ETF (콤보)",
+        "left_title": "지수 (나스닥·다우)",
+        "right_title": "IPO ETF ($)",
+        "series": [
+            {"label": "나스닥 종합", "source": "fred", "id": "NASDAQCOM",
+             "kind": "line", "axis": "left", "color": "#1f77b4"},
+            {"label": "다우존스", "source": "fred", "id": "DJIA",
+             "kind": "line", "axis": "left", "color": "#ff7f0e"},
+            {"label": "IPO ETF", "source": "yfinance", "id": "IPO",
+             "kind": "bar", "axis": "right", "color": "#2ca02c"},
+        ],
+    },
+]

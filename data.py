@@ -147,6 +147,80 @@ def fetch_variable(var, keys, use_cache=True, max_age_hours=12):
         return pd.Series(dtype="float64", name=var["key"]), f"{var['name']}: {e}"
 
 
+def fetch_yfinance(ticker, start=config.DATA_START):
+    """야후 파이낸스에서 종가(Close) Series를 반환. (개별 ETF/지수 티커용)"""
+    import yfinance as yf
+
+    df = yf.download(ticker, start=start, progress=False, auto_adjust=True)
+    if df is None or len(df) == 0:
+        raise RuntimeError(f"yfinance 데이터 없음: {ticker}")
+    close = df["Close"]
+    # 단일 티커라도 컬럼이 MultiIndex(DataFrame)로 올 수 있음 → 첫 컬럼만
+    if hasattr(close, "columns"):
+        close = close.iloc[:, 0]
+    s = close.dropna()
+    s.index = pd.to_datetime(s.index)
+    s.name = ticker
+    return s
+
+
+def _chart_cache_path(sid):
+    safe = sid.replace("^", "idx").replace(".", "_").replace("/", "_")
+    return os.path.join(CACHE_DIR, f"chart_{safe}.parquet")
+
+
+def fetch_chart_series(spec, keys, use_cache=True, max_age_hours=12):
+    """콤보 차트용 시리즈 하나를 조회. 반환: (Series, 오류메시지 or None).
+
+    fetch_variable 과 같은 패턴(신선한 캐시 우선 → 조회 → 실패 시 캐시 폴백).
+    """
+    path = _chart_cache_path(spec["id"])
+
+    if use_cache and os.path.exists(path):
+        age_h = (dt.datetime.now().timestamp() - os.path.getmtime(path)) / 3600.0
+        if age_h < max_age_hours:
+            s = pd.read_parquet(path)["value"]
+            s.name = spec["id"]
+            return s, None
+
+    try:
+        src = spec["source"]
+        if src == "fred":
+            raw = fetch_fred(spec["id"], keys.get("fred", ""))
+        elif src == "yfinance":
+            raw = fetch_yfinance(spec["id"])
+        elif src == "ecos":
+            raw = fetch_ecos(spec["ecos"], keys.get("ecos", ""))
+        else:
+            raise ValueError(f"알 수 없는 source: {src}")
+        raw.name = spec["id"]
+        raw.to_frame("value").to_parquet(path)
+        return raw, None
+    except Exception as e:  # noqa: BLE001
+        if os.path.exists(path):
+            s = pd.read_parquet(path)["value"]
+            s.name = spec["id"]
+            return s, f"{spec['label']}: 최신 조회 실패, 캐시 사용 ({e})"
+        return pd.Series(dtype="float64", name=spec["id"]), f"{spec['label']}: {e}"
+
+
+def load_combo_series(charts, keys, use_cache=True):
+    """콤보 차트들이 쓰는 모든 시리즈를 수집.
+    반환: ({id: Series}, 오류메시지 리스트)
+    """
+    out = {}
+    errors = []
+    for chart in charts:
+        for spec in chart["series"]:
+            if spec["id"] in out:
+                continue
+            s, err = fetch_chart_series(spec, keys, use_cache=use_cache)
+            if err:
+                errors.append(err)
+            out[spec["id"]] = s
+    return out, errors
+
+
 def build_daily_frame(variables, keys, use_cache=True):
     """
     모든 변수를 공통 '일별' 인덱스에 맞춰 forward-fill 한 DataFrame 반환.

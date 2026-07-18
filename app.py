@@ -11,6 +11,7 @@ import io
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -42,6 +43,11 @@ def load_frame(keys, use_cache):
     return data_mod.build_daily_frame(config.VARIABLES, keys, use_cache=use_cache)
 
 
+@st.cache_data(ttl=3600, show_spinner="시장지수를 불러오는 중...")
+def load_combo(keys, use_cache):
+    return data_mod.load_combo_series(config.COMBO_CHARTS, keys, use_cache=use_cache)
+
+
 def fmt(value, decimals, unit):
     if value is None or pd.isna(value):
         return "-"
@@ -68,6 +74,7 @@ period_days = {"1년": 365, "3년": 365 * 3, "5년": 365 * 5, "전체": None}[pe
 
 if st.sidebar.button("🔄 데이터 새로고침 (캐시 무시)"):
     load_frame.clear()
+    load_combo.clear()
     st.rerun()
 
 # ---------------------------------------------------------------------------
@@ -157,15 +164,18 @@ for start in range(0, len(results), PER_ROW):
             st.caption(f"수준 {r['level']} · 추세 {r['trend']} · 가중치 {r['weight']}")
 
 # ---------------------------------------------------------------------------
-# 탭: 그래프 / 테이블 / 점수 기준
+# 탭: 그래프 / 시장지수(콤보) / 테이블 / 점수 기준
 # ---------------------------------------------------------------------------
-tab_graph, tab_table, tab_rule = st.tabs(["📈 그래프", "📋 일별 테이블", "📖 점수 기준"])
+tab_graph, tab_combo, tab_table, tab_rule = st.tabs(
+    ["📈 그래프", "📈 시장지수(콤보)", "📋 일별 테이블", "📖 점수 기준"]
+)
 
 # 기간 필터
 if period_days:
     cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=period_days)
     view = frame[frame.index >= cutoff]
 else:
+    cutoff = None
     view = frame
 
 with tab_graph:
@@ -184,6 +194,48 @@ with tab_graph:
             hovermode="x unified",
         )
         st.plotly_chart(fig, use_container_width=True)
+
+with tab_combo:
+    combo_data, combo_errors = load_combo(keys, use_cache=True)
+    for e in combo_errors:
+        st.warning(e)
+
+    for chart in config.COMBO_CHARTS:
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        drew_left = drew_right = False
+        for spec in chart["series"]:
+            s = combo_data.get(spec["id"], pd.Series(dtype="float64")).dropna()
+            if cutoff is not None:
+                s = s[s.index >= cutoff]
+            if s.empty:
+                continue
+            right = spec["axis"] == "right"
+            if spec["kind"] == "bar":
+                trace = go.Bar(x=s.index, y=s.values, name=spec["label"],
+                               marker_color=spec["color"], opacity=0.35)
+            else:
+                trace = go.Scatter(x=s.index, y=s.values, mode="lines", name=spec["label"],
+                                   line=dict(width=2, color=spec["color"]))
+            fig.add_trace(trace, secondary_y=right)
+            drew_left = drew_left or (not right)
+            drew_right = drew_right or right
+
+        fig.update_layout(
+            title=chart["title"],
+            height=450, margin=dict(l=50, r=50, t=50, b=20),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            barmode="overlay",
+        )
+        fig.update_yaxes(title_text=chart.get("left_title", ""), secondary_y=False)
+        fig.update_yaxes(title_text=chart.get("right_title", ""), secondary_y=True)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.caption(
+        "나스닥·다우존스는 왼쪽 축(선), IPO ETF는 오른쪽 축(막대)입니다. "
+        "지수와 ETF는 스케일이 달라 축을 나눠 표시합니다. "
+        "이 지표들은 참고용 그래프이며 종합점수에는 반영되지 않습니다."
+    )
 
 with tab_table:
     # 컬럼명을 한글로, 최신순 정렬
