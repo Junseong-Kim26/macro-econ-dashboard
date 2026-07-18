@@ -232,7 +232,7 @@ with tab_combo:
         st.plotly_chart(fig, use_container_width=True)
 
     st.caption(
-        "나스닥·다우존스는 왼쪽 축(선), IPO ETF는 오른쪽 축(막대)입니다. "
+        "나스닥·다우존스는 왼쪽 축(선), IPO ETF는 오른쪽 축(선)입니다. "
         "지수와 ETF는 스케일이 달라 축을 나눠 표시합니다. "
         "이 지표들은 참고용 그래프이며 종합점수에는 반영되지 않습니다."
     )

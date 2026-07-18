@@ -283,7 +283,7 @@ COMBO_CHARTS = [
             {"label": "다우존스", "source": "fred", "id": "DJIA",
              "kind": "line", "axis": "left", "color": "#ff7f0e"},
             {"label": "IPO ETF", "source": "yfinance", "id": "IPO",
-             "kind": "bar", "axis": "right", "color": "#2ca02c"},
+             "kind": "line", "axis": "right", "color": "#2ca02c"},
         ],
     },
 ]
