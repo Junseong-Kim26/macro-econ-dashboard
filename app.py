@@ -684,6 +684,10 @@ with tab_roepbr:
                 if st.button("🔄 API로 불러오기", type="primary", key="idx_fetch"):
                     try:
                         dates = krx_api.month_end_dates(yb)
+                        # 월말 목록에 오늘(최근 영업일)이 없으면 마지막에 추가
+                        today = pd.Timestamp.today().normalize()
+                        if not dates or (today - dates[-1]).days > 3:
+                            dates.append(today)
                         cmap = dart_api.load_corp_map()
 
                         # 종목 목록(최근 시점 기준)으로 필요한 사업연도별 재무를 미리 확보
@@ -737,11 +741,16 @@ with tab_roepbr:
                 if idf is None:
                     saved2 = journal.load_table("roe_pbr_index")
                     if saved2 is not None and not saved2.empty:
-                        idf = saved2.copy()
-                        # 예전 업로드 자료에는 날짜 컬럼이 없을 수 있다
-                        if "날짜" in idf.columns:
+                        if "날짜" in saved2.columns:
+                            idf = saved2.copy()
                             idf["날짜"] = pd.to_datetime(idf["날짜"], errors="coerce")
-                        st.info("이전에 수집한 자료를 보여줍니다. 위 버튼으로 갱신하세요.")
+                            st.info("이전에 수집한 자료를 보여줍니다. 위 버튼으로 갱신하세요.")
+                        else:
+                            # 날짜가 없는 예전 업로드 자료 = 하루치 여러 지수 목록
+                            st.warning(
+                                "저장된 자료에 날짜가 없어 사용할 수 없습니다. "
+                                "(예전에 '하루치 전체 지수 목록'을 올리신 것으로 보입니다) "
+                                "위 **🔄 API로 불러오기** 를 눌러 새로 모아주세요.")
 
         # ===== 파일 업로드 =====
         if src2 == "파일 업로드":
@@ -786,26 +795,105 @@ with tab_roepbr:
                     f"{gap:+,.1f}p — " + ("회귀선 위" if gap > 0 else "회귀선 아래"),
                     delta_color="off")
 
+                has_date = "날짜" in idf.columns
+                dstr = (idf["날짜"].dt.strftime("%y.%m") if has_date else None)
+
                 figi = go.Figure()
+                # 시간 순서대로 이어 그려 '시장이 지나온 길'이 보이게 한다
                 figi.add_trace(go.Scatter(
-                    x=idf["PBR"], y=idf["지수"], mode="markers", name="일자별",
-                    marker=dict(size=6, color="#7fb3d5", opacity=0.6),
-                    text=(idf["날짜"].dt.strftime("%Y-%m-%d")
-                          if "날짜" in idf.columns else None),
+                    x=idf["PBR"], y=idf["지수"], mode="lines+markers", name="시점별(시간순)",
+                    line=dict(width=1, color="#b0c4de"),
+                    marker=dict(size=8, color=list(range(len(idf))),
+                                colorscale="Blues", showscale=False,
+                                line=dict(width=1, color="#4c78a8")),
+                    text=(idf["날짜"].dt.strftime("%Y-%m-%d") if has_date else None),
                     hovertemplate="%{text}<br>PBR %{x:.2f}<br>지수 %{y:,.0f}<extra></extra>"))
-                figi.add_trace(go.Scatter(
-                    x=[latest["PBR"]], y=[latest["지수"]], mode="markers", name="최근",
-                    marker=dict(size=15, color="#d62728",
-                                line=dict(width=1, color="white"))))
+
                 xs2, ys2 = equity.fit_line(fit2, idf["PBR"])
                 figi.add_trace(go.Scatter(x=xs2, y=ys2, mode="lines", name="회귀선",
                                           line=dict(width=3, color="#e74c3c")))
+
+                # 최근(오늘) 지점 강조
+                figi.add_trace(go.Scatter(
+                    x=[latest["PBR"]], y=[latest["지수"]], mode="markers+text",
+                    name="최근(오늘)",
+                    marker=dict(size=18, color="#d62728",
+                                line=dict(width=2, color="white")),
+                    text=[f"오늘 {latest['날짜'].strftime('%Y-%m-%d')}" if has_date else "최근"],
+                    textposition="top center",
+                    textfont=dict(size=13, color="#d62728")))
+
+                # 주요 시점(PBR 최고/최저, 지수 최고) 날짜 표시
+                if has_date and len(idf) >= 3:
+                    marks = {
+                        "PBR 최고": idf.loc[idf["PBR"].idxmax()],
+                        "PBR 최저": idf.loc[idf["PBR"].idxmin()],
+                        "지수 최고": idf.loc[idf["지수"].idxmax()],
+                    }
+                    seen = set()
+                    mx, my, mt = [], [], []
+                    for label, row in marks.items():
+                        key = row["날짜"]
+                        if key in seen or key == latest["날짜"]:
+                            continue
+                        seen.add(key)
+                        mx.append(row["PBR"]); my.append(row["지수"])
+                        mt.append(f"{label} {row['날짜'].strftime('%y.%m')}")
+                    if mx:
+                        figi.add_trace(go.Scatter(
+                            x=mx, y=my, mode="markers+text", name="주요 시점",
+                            marker=dict(size=13, color="#ff7f0e",
+                                        line=dict(width=1, color="white")),
+                            text=mt, textposition="bottom center",
+                            textfont=dict(size=11, color="#b35900")))
+
                 figi.update_layout(
-                    height=420, margin=dict(l=60, r=20, t=30, b=40),
-                    xaxis_title="PBR (배)", yaxis_title="코스피지수",
+                    height=460, margin=dict(l=60, r=20, t=30, b=40),
+                    xaxis_title="PBR (배) — 오른쪽일수록 비쌈",
+                    yaxis_title="코스피지수",
                     legend=dict(orientation="h", yanchor="bottom", y=1.02,
                                 xanchor="left", x=0))
                 st.plotly_chart(figi, use_container_width=True)
+
+                # ---- 쉬운 설명 ----
+                if has_date:
+                    first, last = idf.iloc[0], idf.iloc[-1]
+                    pmax = idf.loc[idf["PBR"].idxmax()]
+                    pmin = idf.loc[idf["PBR"].idxmin()]
+                    st.markdown(f"""
+##### 📖 이 그래프가 말해주는 것
+
+**PBR이 뭔가요?** 시장 전체를 하나의 회사로 봤을 때, **장부상 순자산(자본)의 몇 배**에
+거래되고 있는지를 뜻합니다. `PBR = 시가총액 합계 ÷ 자본총계 합계`
+
+- **PBR 1배** = 시장이 회사들의 순자산만큼만 값을 매김 (싼 편)
+- **PBR 2배** = 순자산의 2배를 주고 사고 있음 (비싼 편)
+
+**지금 상황 ({last['날짜'].strftime('%Y년 %m월 %d일')} 기준)**
+
+| 항목 | 값 |
+|---|---|
+| 오늘 코스피 | **{last['지수']:,.0f}** |
+| 오늘 시장 PBR | **{last['PBR']:.2f}배** |
+| 기간 중 가장 비쌌을 때 | {pmax['PBR']:.2f}배 ({pmax['날짜'].strftime('%Y년 %m월')}) |
+| 기간 중 가장 쌌을 때 | {pmin['PBR']:.2f}배 ({pmin['날짜'].strftime('%Y년 %m월')}) |
+| 처음({first['날짜'].strftime('%y년 %m월')}) 대비 | PBR {first['PBR']:.2f} → {last['PBR']:.2f}배 |
+
+**어떻게 읽나요?**
+
+1. **점은 시간 순서로 이어져 있습니다.** 연한 점이 과거, 진한 점이 최근이고,
+   빨간 큰 점이 **오늘**입니다. 선을 따라가면 시장이 지나온 길이 보입니다.
+2. **오른쪽으로 갈수록 비싸진 것**입니다. PBR이 {first['PBR']:.2f}배에서
+   {last['PBR']:.2f}배로 {'올랐다면' if last['PBR']>first['PBR'] else '내렸다면'}
+   같은 순자산에 대해 시장이 {'더 비싸게' if last['PBR']>first['PBR'] else '더 싸게'}
+   값을 매기고 있다는 뜻입니다.
+3. **빨간 회귀선은 평균적인 관계**입니다. 점이 선보다 위에 있으면 그 시점 지수가
+   PBR로 설명되는 수준보다 높았다는 뜻입니다.
+
+**⚠️ 주의**: 지수와 PBR은 둘 다 시가총액에서 나오기 때문에 서로 붙어 움직이는 게
+당연합니다. 그래서 이 그래프는 **지수를 예측하는 용도가 아니라**, "지금 시장이
+순자산 대비 얼마나 비싼가"를 **역사적으로 비교**하는 용도로 보셔야 합니다.
+""")
 
                 if "날짜" in idf.columns:
                     figt = make_subplots(specs=[[{"secondary_y": True}]])

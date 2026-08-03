@@ -127,7 +127,11 @@ def parse_stocks(df):
 # ② 지수 · PBR 시계열
 # ---------------------------------------------------------------------------
 def parse_index(df):
-    """지수 시계열 표에서 날짜·지수·PBR을 뽑아낸다."""
+    """지수 시계열 표에서 날짜·지수·PBR을 뽑아낸다.
+
+    ※ '날짜별 코스피 추이'가 필요하므로 날짜 컬럼이 반드시 있어야 한다.
+       날짜가 없으면 대개 '하루치 여러 지수 목록'을 받은 경우다.
+    """
     c_date = find_col(df, "날짜")
     c_pbr = find_col(df, "PBR")
     c_idx = find_col(df, "종가")
@@ -135,16 +139,22 @@ def parse_index(df):
         raise ValueError("PBR 컬럼을 찾지 못했습니다.")
     if c_idx is None:
         raise ValueError("지수(종가) 컬럼을 찾지 못했습니다.")
+    if c_date is None:
+        raise ValueError(
+            "날짜 컬럼이 없습니다. 이 화면은 '코스피의 날짜별 추이'가 필요합니다.\n"
+            "혹시 '하루치 전체 지수 목록'(코스피·코스피200·섹터지수가 한 줄씩 있는 파일)을 "
+            "올리지 않으셨나요? KRX에서 지수를 **코스피 하나만 고르고 기간을 지정**해 "
+            "받아주세요. (또는 위에서 'API 자동 수집'을 쓰시면 가장 간단합니다)")
 
     out = pd.DataFrame()
-    if c_date is not None:
-        out["날짜"] = pd.to_datetime(df[c_date].astype(str).str.replace(r"[^\d]", "-", regex=True),
-                                   errors="coerce")
+    out["날짜"] = pd.to_datetime(df[c_date].astype(str).str.replace(r"[^\d]", "-", regex=True),
+                                errors="coerce")
     out["지수"] = _to_num(df[c_idx])
     out["PBR"] = _to_num(df[c_pbr])
-    out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=["지수", "PBR"])
-    if "날짜" in out.columns:
-        out = out.dropna(subset=["날짜"]).sort_values("날짜")
+    out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=["지수", "PBR", "날짜"])
+    out = out.sort_values("날짜")
+    if out.empty:
+        raise ValueError("읽을 수 있는 행이 없습니다. 날짜·종가·PBR 열을 확인해주세요.")
     return out.reset_index(drop=True)
 
 
