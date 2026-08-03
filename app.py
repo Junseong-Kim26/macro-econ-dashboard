@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 import config
 import data as data_mod
+import equity
 import journal
 import scoring
 
@@ -167,8 +168,9 @@ for start in range(0, len(results), PER_ROW):
 # ---------------------------------------------------------------------------
 # 탭: 그래프 / 시장지수(콤보) / 테이블 / 점수 기준
 # ---------------------------------------------------------------------------
-tab_graph, tab_combo, tab_table, tab_rule, tab_journal = st.tabs(
-    ["📈 그래프", "📈 시장·환율·금리차", "📋 일별 테이블", "📖 점수 기준", "📝 매매일지"]
+tab_graph, tab_combo, tab_table, tab_rule, tab_roepbr, tab_journal = st.tabs(
+    ["📈 그래프", "📈 시장·환율·금리차", "📋 일별 테이블", "📖 점수 기준",
+     "📉 ROE·PBR 분석", "📝 매매일지"]
 )
 
 # 기간 필터
@@ -284,6 +286,214 @@ with tab_rule:
 # ---------------------------------------------------------------------------
 # 매매일지 (Dropbox 저장 + 비밀번호 잠금)
 # ---------------------------------------------------------------------------
+with tab_roepbr:
+    st.markdown("#### 📉 ROE · PBR 회귀분석")
+    st.caption(
+        "같은 시점의 여러 종목을 한꺼번에 놓고 봅니다. 점 하나가 종목 하나이고, "
+        "회귀선보다 **아래**면 같은 ROE 대비 PBR이 낮다(상대 저평가)는 뜻입니다."
+    )
+
+    sub1, sub2 = st.tabs(["종목별 ROE-PBR", "코스피지수 - PBR"])
+
+    # ---------------- 종목별 ROE vs PBR ----------------
+    with sub1:
+        up = st.file_uploader(
+            "KRX 'PER/PBR/배당수익률' 종목별 자료 (엑셀 또는 CSV)",
+            type=["xlsx", "xls", "csv"], key="up_stocks",
+        )
+
+        sdf = None
+        if up is not None:
+            try:
+                raw = equity.read_table(up)
+                sdf, note = equity.parse_stocks(raw)
+                ok, err = journal.save_table(sdf, "roe_pbr_stocks")
+                st.success(f"{len(sdf)}개 종목을 읽었습니다. {note}"
+                           + ("" if ok else f" (보관 실패: {err})"))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"파일을 읽지 못했습니다: {e}")
+        else:
+            saved = journal.load_table("roe_pbr_stocks")
+            if saved is not None and not saved.empty:
+                sdf = saved
+                st.info("이전에 올린 자료를 사용 중입니다. 새 파일을 올리면 갱신됩니다.")
+
+        if sdf is None or sdf.empty:
+            st.warning("아직 자료가 없습니다. 아래 안내대로 KRX에서 받아 올려주세요.")
+        else:
+            # 시가총액이 있으면 상위 N개만 (코스피200 근사)
+            if "시가총액" in sdf.columns and sdf["시가총액"].notna().any():
+                topn = st.slider("시가총액 상위 몇 개 종목으로 분석할까요?",
+                                 30, min(500, len(sdf)), min(200, len(sdf)), step=10)
+                use = sdf.nlargest(topn, "시가총액").reset_index(drop=True)
+                st.caption(f"시가총액 상위 {topn}개 종목으로 분석합니다 (코스피200 근사).")
+            else:
+                use = sdf.reset_index(drop=True)
+                st.caption(f"업로드한 {len(use)}개 종목 전체로 분석합니다.")
+
+            try:
+                fit = equity.regress(use["ROE"], use["PBR"])
+                res = equity.with_residuals(use, "ROE", "PBR", fit)
+
+                m1, m2, m3 = st.columns(3)
+                m1.metric("회귀식", f"PBR = {fit['slope']:.4f}×ROE + {fit['intercept']:.3f}")
+                m2.metric("설명력 R²", f"{fit['r2']:.3f}")
+                m3.metric("표본 수", f"{fit['n']}개")
+
+                # 종목 강조 선택
+                picked = st.multiselect(
+                    "특정 종목을 강조해서 보기 (종목명 입력)",
+                    options=sorted(res["종목명"].unique()), max_selections=10,
+                )
+
+                figr = go.Figure()
+                base = res[~res["종목명"].isin(picked)]
+                figr.add_trace(go.Scatter(
+                    x=base["ROE"], y=base["PBR"], mode="markers", name="종목",
+                    marker=dict(size=7, color="#7fb3d5", opacity=0.75),
+                    text=base["종목명"],
+                    hovertemplate="%{text}<br>ROE %{x:.2f}%<br>PBR %{y:.2f}<extra></extra>"))
+
+                if picked:
+                    hi = res[res["종목명"].isin(picked)]
+                    figr.add_trace(go.Scatter(
+                        x=hi["ROE"], y=hi["PBR"], mode="markers+text", name="선택 종목",
+                        marker=dict(size=14, color="#d62728",
+                                    line=dict(width=1, color="white")),
+                        text=hi["종목명"], textposition="top center",
+                        hovertemplate="%{text}<br>ROE %{x:.2f}%<br>PBR %{y:.2f}<extra></extra>"))
+
+                xs, ys = equity.fit_line(fit, use["ROE"])
+                figr.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="회귀선",
+                                          line=dict(width=3, color="#e74c3c")))
+                figr.update_layout(
+                    height=460, margin=dict(l=50, r=20, t=30, b=40),
+                    xaxis_title="ROE (%)", yaxis_title="PBR (배)",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                xanchor="left", x=0))
+                st.plotly_chart(figr, use_container_width=True)
+
+                if picked:
+                    st.markdown("###### 선택 종목 위치")
+                    hi = res[res["종목명"].isin(picked)][
+                        ["종목명", "ROE", "PBR", "예측", "잔차", "평가"]]
+                    st.dataframe(hi.round(3), use_container_width=True, hide_index=True)
+
+                c1, c2 = st.columns(2)
+                cols = ["종목명", "ROE", "PBR", "예측", "잔차"]
+                with c1:
+                    st.markdown("###### 회귀선 아래 (상대 저평가) 20")
+                    st.dataframe(res.nsmallest(20, "잔차")[cols].round(3),
+                                 use_container_width=True, hide_index=True)
+                with c2:
+                    st.markdown("###### 회귀선 위 (상대 고평가) 20")
+                    st.dataframe(res.nlargest(20, "잔차")[cols].round(3),
+                                 use_container_width=True, hide_index=True)
+
+                st.download_button(
+                    "⬇️ 분석 결과 CSV",
+                    res.to_csv(index=False).encode("utf-8-sig"),
+                    "ROE_PBR_분석.csv", "text/csv")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"분석 중 문제가 발생했습니다: {e}")
+
+    # ---------------- 코스피지수 vs PBR ----------------
+    with sub2:
+        up2 = st.file_uploader(
+            "KRX 주가지수 'PER/PBR/배당수익률' 기간 자료 (엑셀 또는 CSV)",
+            type=["xlsx", "xls", "csv"], key="up_index",
+        )
+
+        idf = None
+        if up2 is not None:
+            try:
+                raw2 = equity.read_table(up2)
+                idf = equity.parse_index(raw2)
+                ok, err = journal.save_table(idf, "roe_pbr_index")
+                st.success(f"{len(idf)}일치 자료를 읽었습니다."
+                           + ("" if ok else f" (보관 실패: {err})"))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"파일을 읽지 못했습니다: {e}")
+        else:
+            saved2 = journal.load_table("roe_pbr_index")
+            if saved2 is not None and not saved2.empty:
+                idf = saved2
+                if "날짜" in idf.columns:
+                    idf["날짜"] = pd.to_datetime(idf["날짜"], errors="coerce")
+                st.info("이전에 올린 자료를 사용 중입니다. 새 파일을 올리면 갱신됩니다.")
+
+        if idf is None or idf.empty:
+            st.warning("아직 자료가 없습니다. 아래 안내대로 KRX에서 받아 올려주세요.")
+        else:
+            try:
+                fit2 = equity.regress(idf["PBR"], idf["지수"])
+                n1, n2, n3 = st.columns(3)
+                n1.metric("회귀식", f"지수 = {fit2['slope']:,.0f}×PBR + {fit2['intercept']:,.0f}")
+                n2.metric("설명력 R²", f"{fit2['r2']:.3f}")
+                n3.metric("표본 수", f"{fit2['n']}일")
+
+                latest = idf.iloc[-1]
+                pred_now = fit2["slope"] * latest["PBR"] + fit2["intercept"]
+                gap = latest["지수"] - pred_now
+                st.metric(
+                    "현재 지수 vs 회귀선 예측",
+                    f"{latest['지수']:,.1f} (예측 {pred_now:,.1f})",
+                    f"{gap:+,.1f}p — " + ("회귀선 위" if gap > 0 else "회귀선 아래"),
+                    delta_color="off")
+
+                figi = go.Figure()
+                figi.add_trace(go.Scatter(
+                    x=idf["PBR"], y=idf["지수"], mode="markers", name="일자별",
+                    marker=dict(size=6, color="#7fb3d5", opacity=0.6),
+                    text=(idf["날짜"].dt.strftime("%Y-%m-%d")
+                          if "날짜" in idf.columns else None),
+                    hovertemplate="%{text}<br>PBR %{x:.2f}<br>지수 %{y:,.0f}<extra></extra>"))
+                figi.add_trace(go.Scatter(
+                    x=[latest["PBR"]], y=[latest["지수"]], mode="markers", name="최근",
+                    marker=dict(size=15, color="#d62728",
+                                line=dict(width=1, color="white"))))
+                xs2, ys2 = equity.fit_line(fit2, idf["PBR"])
+                figi.add_trace(go.Scatter(x=xs2, y=ys2, mode="lines", name="회귀선",
+                                          line=dict(width=3, color="#e74c3c")))
+                figi.update_layout(
+                    height=420, margin=dict(l=60, r=20, t=30, b=40),
+                    xaxis_title="PBR (배)", yaxis_title="코스피지수",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                xanchor="left", x=0))
+                st.plotly_chart(figi, use_container_width=True)
+
+                if "날짜" in idf.columns:
+                    figt = make_subplots(specs=[[{"secondary_y": True}]])
+                    figt.add_trace(go.Scatter(x=idf["날짜"], y=idf["지수"], mode="lines",
+                                              name="코스피지수",
+                                              line=dict(width=2, color="#1f77b4")), False)
+                    figt.add_trace(go.Scatter(x=idf["날짜"], y=idf["PBR"], mode="lines",
+                                              name="PBR",
+                                              line=dict(width=2, color="#ff7f0e")), True)
+                    figt.update_layout(title="지수 · PBR 시계열", height=340,
+                                       margin=dict(l=50, r=50, t=40, b=20),
+                                       hovermode="x unified",
+                                       legend=dict(orientation="h", yanchor="bottom",
+                                                   y=1.02, xanchor="left", x=0))
+                    figt.update_yaxes(title_text="코스피지수", secondary_y=False)
+                    figt.update_yaxes(title_text="PBR (배)", secondary_y=True)
+                    st.plotly_chart(figt, use_container_width=True)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"분석 중 문제가 발생했습니다: {e}")
+
+    with st.expander("📎 KRX에서 자료 받는 방법"):
+        st.markdown(
+            "**data.krx.co.kr** 접속 → 로그인 (2025년 12월부터 회원가입 필수)\n\n"
+            "**① 종목별 자료**\n"
+            "- [통계] → [주식] → **PER/PBR/배당수익률** → 시장 `KOSPI` 선택 → 조회 → 엑셀 내려받기\n"
+            "- 필요한 컬럼: 종목명, PBR, EPS, BPS (ROE는 EPS÷BPS로 자동 계산)\n\n"
+            "**② 지수 자료**\n"
+            "- [통계] → [지수] → 주가지수 **PER/PBR/배당수익률** → 지수 `코스피` → 기간 지정 → 조회 → 엑셀 내려받기\n"
+            "- 필요한 컬럼: 일자, 종가(지수), PBR\n\n"
+            "컬럼 이름이 조금 달라도(`PBR(배)`, `한글 종목약명` 등) 자동으로 찾습니다. "
+            "한 번 올리면 Dropbox에 보관되어 다음에 다시 올리지 않아도 됩니다."
+        )
+
 with tab_journal:
     st.subheader("📝 매매일지")
 

@@ -225,6 +225,37 @@ def effective_snapshot(pdf, date_str):
     return latest_snapshot_before(pdf, date_str), False
 
 
+# ---------------------------------------------------------------------------
+# 범용 표 보관 (ROE·PBR 업로드 자료 등) — 업로드 한 번 하면 계속 남는다
+# ---------------------------------------------------------------------------
+def save_table(df, name, dbx=None):
+    """DataFrame을 Dropbox에 CSV로 보관. name 예: 'roe_pbr_stocks'."""
+    dbx = dbx or get_client()
+    if dbx is None:
+        return False, "Dropbox 연결 정보가 없습니다."
+    try:
+        import dropbox as _dbx_mod
+
+        path = f"/apps/macro_dashboard/{name}.csv"
+        dbx.files_upload(df.to_csv(index=False).encode("utf-8"), path,
+                         mode=_dbx_mod.files.WriteMode.overwrite)
+        return True, None
+    except Exception as e:  # noqa: BLE001
+        return False, f"보관 중 오류: {e}"
+
+
+def load_table(name, dbx=None):
+    """save_table 로 보관한 표를 다시 읽는다. 없으면 None."""
+    dbx = dbx or get_client()
+    if dbx is None:
+        return None
+    try:
+        _, res = dbx.files_download(f"/apps/macro_dashboard/{name}.csv")
+        return pd.read_csv(io.BytesIO(res.content))
+    except Exception:
+        return None
+
+
 def by_ticker(pdf):
     """날짜(행) × 종목명(열) 금액 표. 그날 목록에 없는 종목은 0(미보유)으로 본다."""
     if pdf.empty:
