@@ -225,6 +225,15 @@ def effective_snapshot(pdf, date_str):
     return latest_snapshot_before(pdf, date_str), False
 
 
+def by_ticker(pdf):
+    """날짜(행) × 종목명(열) 금액 표. 그날 목록에 없는 종목은 0(미보유)으로 본다."""
+    if pdf.empty:
+        return pd.DataFrame()
+    p = pdf.pivot_table(index="날짜", columns="종목명", values="금액",
+                        aggfunc="sum").fillna(0.0)
+    return p.sort_index()
+
+
 def daily_totals(pdf):
     """날짜별 총자산(백만원) 합계."""
     if pdf.empty:

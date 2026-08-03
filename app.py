@@ -426,6 +426,49 @@ with tab_journal:
                                    hovermode="x unified")
                 st.plotly_chart(figa, use_container_width=True)
 
+            # ---- 종목별 자산 추세 ----
+            pivot = journal.by_ticker(pdf)
+            if not pivot.empty:
+                st.markdown("##### 종목별 자산 추세")
+                if len(pivot) >= 2:
+                    mode = st.radio(
+                        "표시 방식", ["선 그래프", "누적 영역(구성)"],
+                        horizontal=True, label_visibility="collapsed",
+                        key="pf_chart_mode",
+                    )
+                    x = pd.to_datetime(pivot.index)
+                    figb = go.Figure()
+                    for name in pivot.columns:
+                        if mode == "누적 영역(구성)":
+                            figb.add_trace(go.Scatter(
+                                x=x, y=pivot[name], mode="lines", name=name,
+                                stackgroup="one", line=dict(width=1)))
+                        else:
+                            figb.add_trace(go.Scatter(
+                                x=x, y=pivot[name], mode="lines+markers",
+                                name=name, line=dict(width=2)))
+                    figb.update_layout(
+                        height=340, margin=dict(l=40, r=20, t=20, b=20),
+                        hovermode="x unified",
+                        yaxis_title="금액 (백만원)",
+                        legend=dict(orientation="h", yanchor="bottom",
+                                    y=1.02, xanchor="left", x=0),
+                    )
+                    st.plotly_chart(figb, use_container_width=True)
+                else:
+                    # 기록이 하루뿐이면 추세 대신 그날 구성으로 보여줌
+                    only = pivot.iloc[-1].sort_values(ascending=True)
+                    only = only[only > 0]
+                    figb = go.Figure(go.Bar(x=only.values, y=only.index,
+                                            orientation="h", marker_color="#2ca02c"))
+                    figb.update_layout(
+                        title=f"{pivot.index[-1]} 종목별 구성 (백만원)",
+                        height=max(220, 40 * len(only) + 100),
+                        margin=dict(l=40, r=20, t=40, b=20),
+                        xaxis_title="금액 (백만원)")
+                    st.plotly_chart(figb, use_container_width=True)
+                    st.caption("기록이 2일 이상 쌓이면 종목별 추세 그래프로 바뀝니다.")
+
             # 전체 글 + 그날 보유내역 펼쳐보기
             st.markdown("##### 전체 내용 보기")
             for _, row in merged.iterrows():
