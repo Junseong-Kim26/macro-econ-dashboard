@@ -643,7 +643,9 @@ with tab_roepbr:
                     saved2 = journal.load_table("roe_pbr_index")
                     if saved2 is not None and not saved2.empty:
                         idf = saved2.copy()
-                        idf["날짜"] = pd.to_datetime(idf["날짜"], errors="coerce")
+                        # 예전 업로드 자료에는 날짜 컬럼이 없을 수 있다
+                        if "날짜" in idf.columns:
+                            idf["날짜"] = pd.to_datetime(idf["날짜"], errors="coerce")
                         st.info("이전에 수집한 자료를 보여줍니다. 위 버튼으로 갱신하세요.")
 
         # ===== 파일 업로드 =====
