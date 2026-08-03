@@ -62,6 +62,18 @@ def fmt(value, decimals, unit):
     return f"{value:,.{decimals}f}{unit}"
 
 
+def _q_table(df, keep_quadrant=False):
+    """4분면 화면·다운로드에서 공통으로 쓰는 표 모양 정리."""
+    cols = (["분면"] if keep_quadrant and "분면" in df.columns else []) + \
+           ["종목명", "ROE", "PBR"]
+    out = df[[c for c in cols if c in df.columns]].copy()
+    out["ROE"] = out["ROE"].round(2)
+    out["PBR"] = out["PBR"].round(2)
+    if "시가총액" in df.columns:
+        out["시가총액(억)"] = (df["시가총액"] / 1e8).round(0)
+    return out.reset_index(drop=True)
+
+
 # ---------------------------------------------------------------------------
 # 사이드바
 # ---------------------------------------------------------------------------
@@ -523,20 +535,54 @@ with tab_roepbr:
                             f"{info['desc']}</div>", unsafe_allow_html=True)
                         if not sub.empty:
                             with st.expander(f"{qname} 종목 보기 ({len(sub)}개)"):
-                                cols = ["종목명", "ROE", "PBR"]
-                                if "시가총액" in sub.columns:
-                                    show = sub[cols + ["시가총액"]].copy()
-                                    show["시가총액(억)"] = (show["시가총액"] / 1e8).round(0)
-                                    show = show.drop(columns=["시가총액"])
-                                else:
-                                    show = sub[cols].copy()
-                                st.dataframe(show.round(2), use_container_width=True,
+                                show = _q_table(sub)
+                                st.dataframe(show, use_container_width=True,
                                              hide_index=True)
+                                st.download_button(
+                                    f"⬇️ {qname} {len(sub)}개 CSV",
+                                    show.to_csv(index=False).encode("utf-8-sig"),
+                                    f"4분면_{qname}.csv", "text/csv",
+                                    key=f"q_dl_{qname}")
 
-                    st.download_button(
-                        "⬇️ 4분면 분류 CSV",
-                        qd.to_csv(index=False).encode("utf-8-sig"),
-                        "ROE_PBR_4분면.csv", "text/csv", key="q_dl")
+                    # ---- 전체 다운로드 (엑셀: 분면별 시트 / CSV: 한 장) ----
+                    st.markdown("###### 전체 내려받기")
+                    d1, d2 = st.columns(2)
+
+                    xbuf2 = io.BytesIO()
+                    with pd.ExcelWriter(xbuf2, engine="openpyxl") as writer:
+                        summary = pd.DataFrame([
+                            {"분면": q,
+                             "위치": equity.QUADRANT_INFO[q]["pos"],
+                             "종목수": int((qd["분면"] == q).sum()),
+                             "설명": equity.QUADRANT_INFO[q]["desc"]}
+                            for q in equity.QUADRANT_ORDER
+                        ])
+                        summary.to_excel(writer, sheet_name="요약", index=False)
+                        for q in equity.QUADRANT_ORDER:
+                            sub_q = qd[qd["분면"] == q]
+                            if sub_q.empty:
+                                continue
+                            sub_q = sub_q.sort_values(
+                                "시가총액" if "시가총액" in qd.columns else "ROE",
+                                ascending=False)
+                            _q_table(sub_q).to_excel(
+                                writer, sheet_name=q[:31], index=False)
+                    d1.download_button(
+                        "⬇️ 엑셀 (분면별 시트)", xbuf2.getvalue(),
+                        f"ROE_PBR_4분면_{pd.Timestamp.today():%Y%m%d}.xlsx",
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet", key="q_dl_xlsx")
+
+                    all_tbl = _q_table(qd.sort_values(
+                        "시가총액" if "시가총액" in qd.columns else "ROE",
+                        ascending=False), keep_quadrant=True)
+                    d2.download_button(
+                        "⬇️ 전체 CSV (한 장)",
+                        all_tbl.to_csv(index=False).encode("utf-8-sig"),
+                        f"ROE_PBR_4분면_{pd.Timestamp.today():%Y%m%d}.csv",
+                        "text/csv", key="q_dl")
+                    st.caption("엑셀 파일은 '요약' 시트에 각 분면의 뜻과 종목수가, "
+                               "나머지 시트에 분면별 종목이 들어 있습니다.")
                 except Exception as e:  # noqa: BLE001
                     st.error(f"4분면 계산 중 문제: {e}")
                 use = None   # 아래 개별 종목 화면은 생략
