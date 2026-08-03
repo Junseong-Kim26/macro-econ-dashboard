@@ -36,18 +36,10 @@ PROFIT_NAMES = ["당기순이익", "당기순이익(손실)", "연결당기순�
 
 
 def get_key(explicit=None):
-    """DART 인증키를 .env / 환경변수 / Streamlit secrets 순으로 찾는다."""
-    if explicit:
-        return explicit
-    key = os.getenv("DART_API_KEY", "")
-    if not key:
-        try:
-            import streamlit as st
+    """DART 인증키를 찾는다(최상위·섹션 안 모두 탐색 — krx_api와 동일 규칙)."""
+    import krx_api
 
-            key = st.secrets.get("DART_API_KEY", "")
-        except Exception:
-            pass
-    return key
+    return explicit or krx_api.find_secret("DART_API_KEY")
 
 
 # ---------------------------------------------------------------------------

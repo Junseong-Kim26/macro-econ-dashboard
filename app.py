@@ -317,9 +317,23 @@ with tab_roepbr:
         # ===== API 자동 수집 =====
         if src == "API 자동 수집":
             if not has_api:
-                st.error(
-                    "API 키가 없습니다. `.env`(로컬) 또는 Streamlit Secrets에 "
-                    "`KRX_API_KEY`, `DART_API_KEY` 를 넣어주세요.")
+                miss = [n for n, v in [("KRX_API_KEY", krx_api.get_key()),
+                                       ("DART_API_KEY", dart_api.get_key())] if not v]
+                st.error(f"API 키를 찾지 못했습니다: {', '.join(miss)}")
+                st.markdown(
+                    "**Streamlit Cloud라면 Secrets 붙여넣은 위치를 확인하세요.** "
+                    "TOML은 `[dropbox]` 같은 섹션 아래에 쓰면 그 섹션 *안*으로 들어갑니다. "
+                    "아래처럼 **맨 위**(섹션보다 먼저)에 두세요:\n"
+                    "```toml\n"
+                    'FRED_API_KEY = "..."\n'
+                    'ECOS_API_KEY = "..."\n'
+                    'KRX_API_KEY = "..."\n'
+                    'DART_API_KEY = "..."\n\n'
+                    "[dropbox]\n"
+                    '...\n'
+                    "```\n"
+                    "수정 후 **Reboot app** 해야 반영됩니다."
+                )
             else:
                 a1, a2 = st.columns(2)
                 year = a1.number_input("재무 기준 사업연도", 2015,

@@ -26,19 +26,37 @@ EP_STOCK_DAILY = ("sto", "stk_bydd_trd")   # 유가증권(코스피) 일별매�
 EP_KOSPI_INDEX = ("idx", "kospi_dd_trd")   # KOSPI 시리즈 일별시세정보
 
 
-def get_key(explicit=None):
-    """인증키를 .env / 환경변수 / Streamlit secrets 순서로 찾는다."""
-    if explicit:
-        return explicit
-    key = os.getenv("KRX_API_KEY", "")
-    if not key:
-        try:
-            import streamlit as st
+def find_secret(name):
+    """환경변수 → Streamlit secrets에서 키를 찾는다.
 
-            key = st.secrets.get("KRX_API_KEY", "")
-        except Exception:
-            pass
-    return key
+    secrets.toml 에서 키를 [dropbox] 같은 섹션 '아래'에 붙여넣으면 TOML 규칙상
+    그 섹션 안으로 들어가 버린다. 그래서 최상위뿐 아니라 각 섹션 안까지 뒤진다.
+    """
+    val = os.getenv(name, "")
+    if val:
+        return val
+    try:
+        import streamlit as st
+
+        secrets = st.secrets
+        if name in secrets:
+            return str(secrets[name])
+        # 섹션 안에 들어가 있는 경우까지 탐색
+        for section in secrets:
+            try:
+                sub = secrets[section]
+                if hasattr(sub, "keys") and name in sub:
+                    return str(sub[name])
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return ""
+
+
+def get_key(explicit=None):
+    """KRX 인증키를 찾는다."""
+    return explicit or find_secret("KRX_API_KEY")
 
 
 def _call(category, endpoint, bas_dd, key, timeout=30):
