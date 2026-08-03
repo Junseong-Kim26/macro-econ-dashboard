@@ -201,13 +201,28 @@ def snapshot(pdf, date_str):
     return rows[["종목명", "금액"]].reset_index(drop=True)
 
 
+def last_date_before(pdf, date_str):
+    """해당 날짜 이전에 자산내역이 저장된 가장 최근 날짜. 없으면 None."""
+    if pdf.empty:
+        return None
+    past = pdf[pdf["날짜"] < date_str]
+    return None if past.empty else past["날짜"].max()
+
+
 def latest_snapshot_before(pdf, date_str):
     """해당 날짜 이전의 가장 최근 보유내역. 새 날짜 입력 시 기본값으로 쓴다."""
-    past = pdf[pdf["날짜"] < date_str]
-    if past.empty:
+    last_date = last_date_before(pdf, date_str)
+    if last_date is None:
         return pd.DataFrame(columns=["종목명", "금액"])
-    last_date = past["날짜"].max()
-    return snapshot(past, last_date)
+    return snapshot(pdf, last_date)
+
+
+def effective_snapshot(pdf, date_str):
+    """그날 저장된 내역이 있으면 그것, 없으면 직전 내역(그대로 유지된 것으로 간주)."""
+    own = snapshot(pdf, date_str)
+    if not own.empty:
+        return own, True
+    return latest_snapshot_before(pdf, date_str), False
 
 
 def daily_totals(pdf):

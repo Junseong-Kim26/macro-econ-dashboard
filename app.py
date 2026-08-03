@@ -340,10 +340,14 @@ with tab_journal:
             st.markdown("##### 💰 자산 운용내역 (백만원)")
             today_pf = journal.snapshot(pdf, date_str)
             if today_pf.empty:
-                # 그날 내역이 없으면 직전 보유내역을 불러와 수정만 하도록
+                # 그날 내역이 없으면 직전 보유내역을 그대로 이어받아 표시
+                src_date = journal.last_date_before(pdf, date_str)
                 today_pf = journal.latest_snapshot_before(pdf, date_str)
                 if not today_pf.empty:
-                    st.caption("직전 보유내역을 불러왔습니다. 수정 후 저장하세요.")
+                    st.caption(
+                        f"📌 {src_date} 내역을 그대로 이어받았습니다. "
+                        "바뀐 게 없으면 그대로 저장하시면 됩니다."
+                    )
             if today_pf.empty:
                 today_pf = pd.DataFrame({"종목명": ["", "", ""], "금액": [0.0, 0.0, 0.0]})
 
@@ -352,7 +356,8 @@ with tab_journal:
                 column_config={
                     "종목명": st.column_config.TextColumn("종목명", width="medium"),
                     "금액": st.column_config.NumberColumn(
-                        "금액(백만원)", min_value=0.0, step=1.0, format="%.1f"),
+                        "금액(백만원)", min_value=0.0, step=0.1, format="%.1f",
+                        help="백만원 단위, 소수 첫째자리까지 입력 (예: 120.5)"),
                 },
                 key=f"pf_editor_{date_str}",
             )
@@ -430,9 +435,10 @@ with tab_journal:
                     jrow = jdf[jdf["날짜"] == d]
                     body = jrow["내용"].iloc[0] if len(jrow) else ""
                     st.write(body if str(body).strip() else "(일지 내용 없음)")
-                    day_pf = journal.snapshot(pdf, d)
+                    day_pf, is_own = journal.effective_snapshot(pdf, d)
                     if not day_pf.empty:
-                        st.caption("보유내역 (백만원)")
+                        st.caption("보유내역 (백만원)" if is_own
+                                   else "보유내역 (백만원) — 직전 기록 유지")
                         st.dataframe(day_pf, use_container_width=True, hide_index=True)
 
             c1, c2 = st.columns(2)
