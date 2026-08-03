@@ -201,7 +201,10 @@ def fetch_chart_series(spec, keys, use_cache=True, max_age_hours=12):
             s = pd.read_parquet(path)["value"]
             s.name = spec["id"]
             return s, f"{spec['label']}: 최신 조회 실패, 캐시 사용 ({e})"
-        return pd.Series(dtype="float64", name=spec["id"]), f"{spec['label']}: {e}"
+        # 빈 결과도 날짜 인덱스를 갖게 해서 이후 날짜 비교가 깨지지 않도록 한다
+        empty = pd.Series(dtype="float64", name=spec["id"],
+                          index=pd.DatetimeIndex([], name="date"))
+        return empty, f"{spec['label']}: {e}"
 
 
 def load_combo_series(charts, keys, use_cache=True):

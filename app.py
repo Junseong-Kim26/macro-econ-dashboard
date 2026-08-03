@@ -214,6 +214,9 @@ with tab_combo:
         drew_left = drew_right = False
         for spec in chart["series"]:
             s = combo_data.get(spec["id"], pd.Series(dtype="float64")).dropna()
+            # 수집 실패한 시리즈는 인덱스가 날짜형이 아니므로 날짜 비교 전에 걸러낸다
+            if s.empty or not isinstance(s.index, pd.DatetimeIndex):
+                continue
             if cutoff is not None:
                 s = s[s.index >= cutoff]
             if s.empty:
