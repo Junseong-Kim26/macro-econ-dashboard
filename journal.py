@@ -21,6 +21,10 @@ COLUMNS = ["날짜", "요약", "내용"]
 DEFAULT_PATH = "/apps/macro_dashboard/trade_journal.csv"
 SUMMARY_MAX = 60  # 자동 요약 시 자를 길이
 
+# 자산 운용내역: 날짜별 종목 평가액(백만원)
+PF_COLUMNS = ["날짜", "종목명", "금액"]
+DEFAULT_PF_PATH = "/apps/macro_dashboard/portfolio.csv"
+
 
 # ---------------------------------------------------------------------------
 # 설정 / 연결
@@ -35,6 +39,10 @@ def _cfg():
 
 def journal_path():
     return _cfg().get("journal_path", DEFAULT_PATH)
+
+
+def portfolio_path():
+    return _cfg().get("portfolio_path", DEFAULT_PF_PATH)
 
 
 def get_client():
@@ -126,6 +134,91 @@ def one_line(summary, body):
     return first or "(내용 없음)"
 
 
+# ---------------------------------------------------------------------------
+# 자산 운용내역 (날짜 · 종목명 · 금액[백만원])
+# ---------------------------------------------------------------------------
+def empty_pf():
+    return pd.DataFrame(columns=PF_COLUMNS)
+
+
+def load_portfolio(dbx=None):
+    """Dropbox에서 자산 운용내역을 읽어 DataFrame으로 반환."""
+    dbx = dbx or get_client()
+    if dbx is None:
+        return empty_pf()
+    try:
+        _, res = dbx.files_download(portfolio_path())
+        df = pd.read_csv(io.BytesIO(res.content))
+    except Exception:
+        return empty_pf()
+
+    for col in PF_COLUMNS:
+        if col not in df.columns:
+            df[col] = "" if col != "금액" else 0
+    df["날짜"] = df["날짜"].astype(str)
+    df["종목명"] = df["종목명"].fillna("").astype(str).replace("nan", "")
+    df["금액"] = pd.to_numeric(df["금액"], errors="coerce").fillna(0.0)
+    df = df[df["종목명"].str.strip() != ""]
+    return df[PF_COLUMNS].reset_index(drop=True)
+
+
+def save_portfolio(df, dbx=None):
+    """자산 운용내역을 Dropbox CSV로 저장."""
+    dbx = dbx or get_client()
+    if dbx is None:
+        return False, "Dropbox 연결 정보가 없습니다."
+    try:
+        import dropbox as _dbx_mod
+
+        data = df[PF_COLUMNS].to_csv(index=False).encode("utf-8")
+        dbx.files_upload(data, portfolio_path(), mode=_dbx_mod.files.WriteMode.overwrite)
+        return True, None
+    except Exception as e:  # noqa: BLE001
+        return False, f"자산 내역 저장 중 오류가 발생했습니다: {e}"
+
+
+def upsert_portfolio(pdf, date_str, rows):
+    """해당 날짜의 보유내역을 rows(종목명·금액)로 통째 교체한 새 DataFrame 반환."""
+    pdf = pdf.copy()
+    kept = pdf[pdf["날짜"] != date_str]
+
+    rows = rows.copy()
+    if "종목명" not in rows.columns:
+        rows["종목명"] = ""
+    rows["종목명"] = rows["종목명"].fillna("").astype(str).str.strip()
+    rows["금액"] = pd.to_numeric(rows.get("금액"), errors="coerce").fillna(0.0)
+    rows = rows[rows["종목명"] != ""]
+    rows["날짜"] = date_str
+
+    parts = [p for p in (kept, rows[PF_COLUMNS]) if not p.empty]
+    out = pd.concat(parts, ignore_index=True) if parts else empty_pf()
+    return out.sort_values(["날짜", "종목명"], ascending=[False, True]).reset_index(drop=True)
+
+
+def snapshot(pdf, date_str):
+    """특정 날짜의 보유내역(종목명·금액)."""
+    rows = pdf[pdf["날짜"] == date_str]
+    return rows[["종목명", "금액"]].reset_index(drop=True)
+
+
+def latest_snapshot_before(pdf, date_str):
+    """해당 날짜 이전의 가장 최근 보유내역. 새 날짜 입력 시 기본값으로 쓴다."""
+    past = pdf[pdf["날짜"] < date_str]
+    if past.empty:
+        return pd.DataFrame(columns=["종목명", "금액"])
+    last_date = past["날짜"].max()
+    return snapshot(past, last_date)
+
+
+def daily_totals(pdf):
+    """날짜별 총자산(백만원) 합계."""
+    if pdf.empty:
+        return pd.DataFrame(columns=["날짜", "총자산"])
+    g = pdf.groupby("날짜", as_index=False)["금액"].sum()
+    g.columns = ["날짜", "총자산"]
+    return g.sort_values("날짜", ascending=False).reset_index(drop=True)
+
+
 def upsert(df, date_str, summary, body):
     """같은 날짜가 있으면 덮어쓰고, 없으면 추가한 새 DataFrame 반환."""
     df = df.copy()
@@ -135,5 +228,5 @@ def upsert(df, date_str, summary, body):
         df.loc[mask, "내용"] = body
     else:
         new = pd.DataFrame([{"날짜": date_str, "요약": summary, "내용": body}])
-        df = pd.concat([df, new], ignore_index=True)
+        df = pd.concat([df, new], ignore_index=True) if not df.empty else new
     return df.sort_values("날짜", ascending=False).reset_index(drop=True)

@@ -308,12 +308,10 @@ with tab_journal:
         )
     else:
         jdf = journal.load()
+        pdf = journal.load_portfolio()
 
-        # ---- 작성 / 수정 ----
-        st.markdown("##### 일지 작성")
-        jcol1, jcol2 = st.columns([1, 3])
-        with jcol1:
-            j_date = st.date_input("날짜", value=pd.Timestamp.today().date())
+        # 날짜 선택 (일지와 자산내역이 같은 날짜를 공유)
+        j_date = st.date_input("날짜", value=pd.Timestamp.today().date())
         date_str = str(j_date)
 
         # 같은 날짜 글이 이미 있으면 불러와서 수정할 수 있게
@@ -321,52 +319,130 @@ with tab_journal:
         prev_sum = existing["요약"].iloc[0] if len(existing) else ""
         prev_body = existing["내용"].iloc[0] if len(existing) else ""
         if len(existing):
-            jcol2.info(f"{date_str} 일지가 이미 있습니다. 수정 후 저장하면 덮어씁니다.")
+            st.info(f"{date_str} 일지가 이미 있습니다. 수정 후 저장하면 덮어씁니다.")
 
-        j_summary = st.text_input(
-            "핵심 한 줄 (목록에 표시됩니다)", value=prev_sum,
-            placeholder="예) 반도체 비중 축소, 금리 상승에 방어적 대응",
-        )
-        j_body = st.text_area(
-            "내용", value=prev_body, height=200,
-            placeholder="매매 종목, 이유, 시황 판단, 반성할 점 등을 자유롭게 적으세요.",
-        )
+        left, right = st.columns([3, 2])
 
+        # ---- 왼쪽: 매매일지 작성 ----
+        with left:
+            st.markdown("##### 📝 일지 작성")
+            j_summary = st.text_input(
+                "핵심 한 줄 (목록에 표시됩니다)", value=prev_sum,
+                placeholder="예) 반도체 비중 축소, 금리 상승에 방어적 대응",
+            )
+            j_body = st.text_area(
+                "내용", value=prev_body, height=300,
+                placeholder="매매 종목, 이유, 시황 판단, 반성할 점 등을 자유롭게 적으세요.",
+            )
+
+        # ---- 오른쪽: 자산 운용내역 ----
+        with right:
+            st.markdown("##### 💰 자산 운용내역 (백만원)")
+            today_pf = journal.snapshot(pdf, date_str)
+            if today_pf.empty:
+                # 그날 내역이 없으면 직전 보유내역을 불러와 수정만 하도록
+                today_pf = journal.latest_snapshot_before(pdf, date_str)
+                if not today_pf.empty:
+                    st.caption("직전 보유내역을 불러왔습니다. 수정 후 저장하세요.")
+            if today_pf.empty:
+                today_pf = pd.DataFrame({"종목명": ["", "", ""], "금액": [0.0, 0.0, 0.0]})
+
+            edited_pf = st.data_editor(
+                today_pf, num_rows="dynamic", use_container_width=True, height=260,
+                column_config={
+                    "종목명": st.column_config.TextColumn("종목명", width="medium"),
+                    "금액": st.column_config.NumberColumn(
+                        "금액(백만원)", min_value=0.0, step=1.0, format="%.1f"),
+                },
+                key=f"pf_editor_{date_str}",
+            )
+            _tot = pd.to_numeric(edited_pf["금액"], errors="coerce").fillna(0).sum()
+            st.metric("합계", f"{_tot:,.1f} 백만원")
+
+        # ---- 저장 (일지 + 자산내역 함께) ----
         if st.button("💾 저장", type="primary"):
-            if not j_summary.strip() and not j_body.strip():
-                st.warning("내용을 입력하세요.")
+            msgs = []
+            has_journal = bool(j_summary.strip() or j_body.strip())
+            has_pf = (edited_pf["종목명"].fillna("").astype(str).str.strip() != "").any()
+
+            if not has_journal and not has_pf:
+                st.warning("일지 내용이나 자산 내역을 입력하세요.")
             else:
-                newdf = journal.upsert(jdf, date_str, j_summary.strip(), j_body.strip())
-                ok, err = journal.save(newdf)
-                if ok:
-                    st.success(f"{date_str} 일지를 저장했습니다.")
+                ok_all = True
+                if has_journal:
+                    newdf = journal.upsert(jdf, date_str, j_summary.strip(), j_body.strip())
+                    ok, err = journal.save(newdf)
+                    ok_all &= ok
+                    msgs.append("일지 저장" if ok else f"일지 실패: {err}")
+                if has_pf:
+                    newpf = journal.upsert_portfolio(pdf, date_str, edited_pf)
+                    ok, err = journal.save_portfolio(newpf)
+                    ok_all &= ok
+                    msgs.append("자산내역 저장" if ok else f"자산내역 실패: {err}")
+                if ok_all:
+                    st.success(f"{date_str} — " + " · ".join(msgs))
                     st.rerun()
                 else:
-                    st.error(err)
+                    st.error(" / ".join(msgs))
 
         st.divider()
 
-        # ---- 일자별 핵심내용 한 줄 목록 ----
+        # ---- 일자별 핵심내용 + 총자산 목록 ----
         st.markdown("##### 일자별 기록")
-        if jdf.empty:
-            st.caption("아직 작성한 일지가 없습니다.")
+        totals = journal.daily_totals(pdf)
+
+        if jdf.empty and totals.empty:
+            st.caption("아직 작성한 기록이 없습니다.")
         else:
             lines = pd.DataFrame({
                 "날짜": jdf["날짜"],
                 "핵심내용": [journal.one_line(s, b)
                             for s, b in zip(jdf["요약"], jdf["내용"])],
             })
-            st.dataframe(lines, use_container_width=True, hide_index=True, height=280)
+            # 일지가 없는 날에도 자산내역만 있으면 목록에 나오도록 바깥조인
+            merged = pd.merge(lines, totals, on="날짜", how="outer")
+            merged["핵심내용"] = merged["핵심내용"].fillna("(일지 없음)")
+            merged = merged.sort_values("날짜", ascending=False).reset_index(drop=True)
+            merged["총자산(백만원)"] = merged["총자산"].map(
+                lambda v: "-" if pd.isna(v) else f"{v:,.1f}")
+            st.dataframe(merged[["날짜", "핵심내용", "총자산(백만원)"]],
+                         use_container_width=True, hide_index=True, height=280)
 
-            # 전체 글 펼쳐보기
+            # 총자산 추이
+            if len(totals) >= 2:
+                tchart = totals.sort_values("날짜")
+                figa = go.Figure()
+                figa.add_trace(go.Scatter(
+                    x=pd.to_datetime(tchart["날짜"]), y=tchart["총자산"],
+                    mode="lines+markers", name="총자산",
+                    line=dict(width=2, color="#2ca02c")))
+                figa.update_layout(title="총자산 추이 (백만원)", height=280,
+                                   margin=dict(l=40, r=20, t=40, b=20),
+                                   hovermode="x unified")
+                st.plotly_chart(figa, use_container_width=True)
+
+            # 전체 글 + 그날 보유내역 펼쳐보기
             st.markdown("##### 전체 내용 보기")
-            for _, row in jdf.iterrows():
-                head = journal.one_line(row["요약"], row["내용"])
-                with st.expander(f"{row['날짜']} — {head}"):
-                    st.write(row["내용"] if row["내용"].strip() else "(내용 없음)")
+            for _, row in merged.iterrows():
+                d = row["날짜"]
+                tot = "" if pd.isna(row["총자산"]) else f"  ·  총자산 {row['총자산']:,.1f}백만"
+                with st.expander(f"{d} — {row['핵심내용']}{tot}"):
+                    jrow = jdf[jdf["날짜"] == d]
+                    body = jrow["내용"].iloc[0] if len(jrow) else ""
+                    st.write(body if str(body).strip() else "(일지 내용 없음)")
+                    day_pf = journal.snapshot(pdf, d)
+                    if not day_pf.empty:
+                        st.caption("보유내역 (백만원)")
+                        st.dataframe(day_pf, use_container_width=True, hide_index=True)
 
-            st.download_button(
-                "⬇️ 매매일지 CSV 다운로드",
+            c1, c2 = st.columns(2)
+            c1.download_button(
+                "⬇️ 매매일지 CSV",
                 jdf.to_csv(index=False).encode("utf-8-sig"),
                 "매매일지.csv", "text/csv",
+            )
+            c2.download_button(
+                "⬇️ 자산내역 CSV",
+                pdf.to_csv(index=False).encode("utf-8-sig"),
+                "자산운용내역.csv", "text/csv",
             )
