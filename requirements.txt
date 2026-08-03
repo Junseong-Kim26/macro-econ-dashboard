@@ -6,3 +6,4 @@ python-dotenv>=1.0
 openpyxl>=3.1
 pyarrow>=14.0
 yfinance>=0.2
+dropbox>=11.36

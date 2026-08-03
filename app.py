@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 import config
 import data as data_mod
+import journal
 import scoring
 
 load_dotenv()
@@ -166,8 +167,8 @@ for start in range(0, len(results), PER_ROW):
 # ---------------------------------------------------------------------------
 # 탭: 그래프 / 시장지수(콤보) / 테이블 / 점수 기준
 # ---------------------------------------------------------------------------
-tab_graph, tab_combo, tab_table, tab_rule = st.tabs(
-    ["📈 그래프", "📈 시장·환율·금리차", "📋 일별 테이블", "📖 점수 기준"]
+tab_graph, tab_combo, tab_table, tab_rule, tab_journal = st.tabs(
+    ["📈 그래프", "📈 시장·환율·금리차", "📋 일별 테이블", "📖 점수 기준", "📝 매매일지"]
 )
 
 # 기간 필터
@@ -279,3 +280,93 @@ with tab_rule:
         "하락=우호. 크게하락 5 · 소폭하락 4 · 보합 3 · 소폭상승 2 · 크게상승 1\n\n"
         "임계값·가중치·점수구간은 모두 `config.py` 에서 숫자만 바꾸면 됩니다."
     )
+
+# ---------------------------------------------------------------------------
+# 매매일지 (Dropbox 저장 + 비밀번호 잠금)
+# ---------------------------------------------------------------------------
+with tab_journal:
+    st.subheader("📝 매매일지")
+
+    _pw = journal.get_password()
+    _unlocked = (not _pw) or st.session_state.get("journal_ok", False)
+
+    if not _unlocked:
+        # 공개 앱이므로, 비밀번호를 아는 사람만 열람/작성
+        st.info("매매일지는 비공개입니다. 비밀번호를 입력하세요.")
+        entered = st.text_input("비밀번호", type="password", key="journal_pw")
+        if st.button("열기"):
+            if entered == _pw:
+                st.session_state["journal_ok"] = True
+                st.rerun()
+            else:
+                st.error("비밀번호가 맞지 않습니다.")
+    elif journal.get_client() is None:
+        st.warning(
+            "Dropbox 연결 정보가 없어 매매일지를 저장할 수 없습니다. "
+            "`.streamlit/secrets.toml`(또는 Streamlit Cloud > Settings > Secrets)의 "
+            "`[dropbox]` 설정을 확인하세요."
+        )
+    else:
+        jdf = journal.load()
+
+        # ---- 작성 / 수정 ----
+        st.markdown("##### 일지 작성")
+        jcol1, jcol2 = st.columns([1, 3])
+        with jcol1:
+            j_date = st.date_input("날짜", value=pd.Timestamp.today().date())
+        date_str = str(j_date)
+
+        # 같은 날짜 글이 이미 있으면 불러와서 수정할 수 있게
+        existing = jdf[jdf["날짜"] == date_str]
+        prev_sum = existing["요약"].iloc[0] if len(existing) else ""
+        prev_body = existing["내용"].iloc[0] if len(existing) else ""
+        if len(existing):
+            jcol2.info(f"{date_str} 일지가 이미 있습니다. 수정 후 저장하면 덮어씁니다.")
+
+        j_summary = st.text_input(
+            "핵심 한 줄 (목록에 표시됩니다)", value=prev_sum,
+            placeholder="예) 반도체 비중 축소, 금리 상승에 방어적 대응",
+        )
+        j_body = st.text_area(
+            "내용", value=prev_body, height=200,
+            placeholder="매매 종목, 이유, 시황 판단, 반성할 점 등을 자유롭게 적으세요.",
+        )
+
+        if st.button("💾 저장", type="primary"):
+            if not j_summary.strip() and not j_body.strip():
+                st.warning("내용을 입력하세요.")
+            else:
+                newdf = journal.upsert(jdf, date_str, j_summary.strip(), j_body.strip())
+                ok, err = journal.save(newdf)
+                if ok:
+                    st.success(f"{date_str} 일지를 저장했습니다.")
+                    st.rerun()
+                else:
+                    st.error(err)
+
+        st.divider()
+
+        # ---- 일자별 핵심내용 한 줄 목록 ----
+        st.markdown("##### 일자별 기록")
+        if jdf.empty:
+            st.caption("아직 작성한 일지가 없습니다.")
+        else:
+            lines = pd.DataFrame({
+                "날짜": jdf["날짜"],
+                "핵심내용": [journal.one_line(s, b)
+                            for s, b in zip(jdf["요약"], jdf["내용"])],
+            })
+            st.dataframe(lines, use_container_width=True, hide_index=True, height=280)
+
+            # 전체 글 펼쳐보기
+            st.markdown("##### 전체 내용 보기")
+            for _, row in jdf.iterrows():
+                head = journal.one_line(row["요약"], row["내용"])
+                with st.expander(f"{row['날짜']} — {head}"):
+                    st.write(row["내용"] if row["내용"].strip() else "(내용 없음)")
+
+            st.download_button(
+                "⬇️ 매매일지 CSV 다운로드",
+                jdf.to_csv(index=False).encode("utf-8-sig"),
+                "매매일지.csv", "text/csv",
+            )
