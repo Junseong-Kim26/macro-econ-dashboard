@@ -351,18 +351,27 @@ with tab_journal:
             if today_pf.empty:
                 today_pf = pd.DataFrame({"종목명": ["", "", ""], "금액": [0.0, 0.0, 0.0]})
 
+            # 입력 중인 표를 세션에 보관 → 엔터(재실행) 후에도 입력값이 남는다.
+            pf_state_key = f"pf_rows_{date_str}"
+            if pf_state_key not in st.session_state:
+                st.session_state[pf_state_key] = today_pf.reset_index(drop=True)
+
             edited_pf = st.data_editor(
-                today_pf, num_rows="dynamic", use_container_width=True, height=260,
+                st.session_state[pf_state_key],
+                num_rows="dynamic", use_container_width=True, height=260,
                 column_config={
                     "종목명": st.column_config.TextColumn("종목명", width="medium"),
                     "금액": st.column_config.NumberColumn(
                         "금액(백만원)", min_value=0.0, step=0.1, format="%.1f",
                         help="백만원 단위, 소수 첫째자리까지 입력 (예: 120.5)"),
                 },
-                key=f"pf_editor_{date_str}",
             )
+            # 편집 결과를 세션에 되돌려 저장 → 다음 재실행 때 그대로 이어짐
+            st.session_state[pf_state_key] = edited_pf
+
             _tot = pd.to_numeric(edited_pf["금액"], errors="coerce").fillna(0).sum()
             st.metric("합계", f"{_tot:,.1f} 백만원")
+            st.caption("종목명만 입력해도 저장됩니다 (금액은 나중에 채워도 됩니다).")
 
         # ---- 저장 (일지 + 자산내역 함께) ----
         if st.button("💾 저장", type="primary"):
@@ -385,6 +394,8 @@ with tab_journal:
                     ok_all &= ok
                     msgs.append("자산내역 저장" if ok else f"자산내역 실패: {err}")
                 if ok_all:
+                    # 저장 완료 → 임시 입력값을 비워 Dropbox 최신본을 다시 읽게 함
+                    st.session_state.pop(pf_state_key, None)
                     st.success(f"{date_str} — " + " · ".join(msgs))
                     st.rerun()
                 else:
@@ -430,44 +441,32 @@ with tab_journal:
             pivot = journal.by_ticker(pdf)
             if not pivot.empty:
                 st.markdown("##### 종목별 자산 추세")
-                if len(pivot) >= 2:
-                    mode = st.radio(
-                        "표시 방식", ["선 그래프", "누적 영역(구성)"],
-                        horizontal=True, label_visibility="collapsed",
-                        key="pf_chart_mode",
-                    )
-                    x = pd.to_datetime(pivot.index)
-                    figb = go.Figure()
-                    for name in pivot.columns:
-                        if mode == "누적 영역(구성)":
-                            figb.add_trace(go.Scatter(
-                                x=x, y=pivot[name], mode="lines", name=name,
-                                stackgroup="one", line=dict(width=1)))
-                        else:
-                            figb.add_trace(go.Scatter(
-                                x=x, y=pivot[name], mode="lines+markers",
-                                name=name, line=dict(width=2)))
-                    figb.update_layout(
-                        height=340, margin=dict(l=40, r=20, t=20, b=20),
-                        hovermode="x unified",
-                        yaxis_title="금액 (백만원)",
-                        legend=dict(orientation="h", yanchor="bottom",
-                                    y=1.02, xanchor="left", x=0),
-                    )
-                    st.plotly_chart(figb, use_container_width=True)
-                else:
-                    # 기록이 하루뿐이면 추세 대신 그날 구성으로 보여줌
-                    only = pivot.iloc[-1].sort_values(ascending=True)
-                    only = only[only > 0]
-                    figb = go.Figure(go.Bar(x=only.values, y=only.index,
-                                            orientation="h", marker_color="#2ca02c"))
-                    figb.update_layout(
-                        title=f"{pivot.index[-1]} 종목별 구성 (백만원)",
-                        height=max(220, 40 * len(only) + 100),
-                        margin=dict(l=40, r=20, t=40, b=20),
-                        xaxis_title="금액 (백만원)")
-                    st.plotly_chart(figb, use_container_width=True)
-                    st.caption("기록이 2일 이상 쌓이면 종목별 추세 그래프로 바뀝니다.")
+                mode = st.radio(
+                    "표시 방식", ["선 그래프", "누적 영역(구성)"],
+                    horizontal=True, label_visibility="collapsed",
+                    key="pf_chart_mode",
+                )
+                x = pd.to_datetime(pivot.index)
+                figb = go.Figure()
+                for name in pivot.columns:
+                    if mode == "누적 영역(구성)":
+                        figb.add_trace(go.Scatter(
+                            x=x, y=pivot[name], mode="lines", name=name,
+                            stackgroup="one", line=dict(width=1)))
+                    else:
+                        figb.add_trace(go.Scatter(
+                            x=x, y=pivot[name], mode="lines+markers",
+                            name=name, line=dict(width=2)))
+                figb.update_layout(
+                    height=340, margin=dict(l=40, r=20, t=20, b=20),
+                    hovermode="x unified",
+                    yaxis_title="금액 (백만원)",
+                    legend=dict(orientation="h", yanchor="bottom",
+                                y=1.02, xanchor="left", x=0),
+                )
+                st.plotly_chart(figb, use_container_width=True)
+                if len(pivot) == 1:
+                    st.caption("하루치라 점으로 표시됩니다. 날짜가 쌓이면 자동으로 추세선이 이어집니다.")
 
             # 전체 글 + 그날 보유내역 펼쳐보기
             st.markdown("##### 전체 내용 보기")
