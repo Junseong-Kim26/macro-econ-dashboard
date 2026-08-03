@@ -162,6 +162,33 @@ def fetch_kospi_index(bas_dd, key=None, index_name="코스피"):
     return out.reset_index(drop=True)
 
 
+def fetch_near(fetch_fn, date, key=None, back=7):
+    """해당 날짜가 휴장일이면 직전 영업일까지 거슬러 시도한다.
+
+    fetch_fn : fetch_stock_daily / fetch_kospi_index
+    반환: (DataFrame, 실제 사용된 기준일) — 못 찾으면 (빈 DF, None)
+    """
+    d = pd.Timestamp(date)
+    for i in range(back):
+        bas = (d - pd.Timedelta(days=i)).strftime("%Y%m%d")
+        try:
+            df = fetch_fn(bas, key)
+            if df is not None and not df.empty:
+                return df, bas
+        except PermissionError:
+            raise
+        except Exception:
+            continue
+    return pd.DataFrame(), None
+
+
+def month_end_dates(years_back=3, end=None):
+    """최근 N년치 월말 날짜 목록(과거→현재)."""
+    end = pd.Timestamp(end) if end else pd.Timestamp.today().normalize()
+    start = end - pd.DateOffset(years=years_back)
+    return list(pd.date_range(start, end, freq="ME"))
+
+
 def fetch_latest_stock_daily(key=None, days_back=10):
     """가장 최근 영업일 데이터를 자동으로 찾아 반환. 반환: (DataFrame, 기준일)."""
     key = get_key(key)

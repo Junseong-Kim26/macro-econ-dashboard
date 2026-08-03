@@ -209,6 +209,17 @@ def filter_outliers(df, pbr_max=10.0, roe_min=-50.0, roe_max=100.0):
     return out.reset_index(drop=True), n0 - len(out)
 
 
+def fiscal_year_for(date, month_cutoff=4):
+    """그 시점에 이미 공시되어 있었을 '가장 최근 사업연도'를 고른다.
+
+    사업보고서는 결산 후 3개월 이내(대개 3월 말)에 제출되므로,
+    4월 이후면 직전 연도, 1~3월이면 그 전 연도 재무를 쓴다.
+    (미래 정보를 끌어다 쓰지 않기 위한 처리)
+    """
+    d = pd.Timestamp(date)
+    return d.year - 1 if d.month >= month_cutoff else d.year - 2
+
+
 def bin_by_roe(df, nbin=8, stat="median"):
     """ROE를 같은 개수씩 구간으로 나눠 대표값(중앙값)을 낸다.
 

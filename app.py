@@ -565,12 +565,94 @@ with tab_roepbr:
 
     # ---------------- 코스피지수 vs PBR ----------------
     with sub2:
-        up2 = st.file_uploader(
-            "KRX 주가지수 'PER/PBR/배당수익률' 기간 자료 (엑셀 또는 CSV)",
-            type=["xlsx", "xls", "csv"], key="up_index",
+        src2 = st.radio(
+            "데이터 가져오는 방법",
+            ["API 자동 수집", "파일 업로드"],
+            horizontal=True, index=0 if has_api else 1, key="idx_src",
         )
 
         idf = None
+        up2 = None
+
+        # ===== API 자동 수집 (월말 시점별로 시장 전체 PBR 계산) =====
+        if src2 == "API 자동 수집":
+            if not has_api:
+                st.error("API 키가 없습니다. 위 '종목별' 탭의 안내를 참고하세요.")
+            else:
+                st.caption(
+                    "월말마다 **시장 전체 시가총액 ÷ 자본총계**로 코스피 PBR을 계산합니다. "
+                    "각 시점에는 그때 이미 공시돼 있던 재무만 사용합니다."
+                )
+                yb = st.slider("몇 년치를 모을까요?", 1, 6, 3, key="idx_years")
+                st.caption(f"약 {yb*12}개 시점 × 2회 조회 → **{yb*12*4//60}분 내외** 걸립니다.")
+
+                if st.button("🔄 API로 불러오기", type="primary", key="idx_fetch"):
+                    try:
+                        dates = krx_api.month_end_dates(yb)
+                        cmap = dart_api.load_corp_map()
+
+                        # 종목 목록(최근 시점 기준)으로 필요한 사업연도별 재무를 미리 확보
+                        with st.spinner("최근 종목 목록을 받는 중..."):
+                            latest_k, _ = krx_api.fetch_latest_stock_daily()
+                        codes = [cmap[c] for c in latest_k["종목코드"] if c in cmap]
+
+                        years = sorted({equity.fiscal_year_for(d) for d in dates})
+                        fin_by_year = {}
+                        fb = st.progress(0.0, text="DART 재무 준비 중...")
+                        for i, y in enumerate(years):
+                            fin_by_year[y] = dart_api.fetch_financials(codes, y, "11011")
+                            fb.progress((i + 1) / len(years),
+                                        text=f"DART 재무 준비 중... {y}년 ({i+1}/{len(years)})")
+                        fb.empty()
+
+                        rows = []
+                        pb = st.progress(0.0, text="시점별 수집 중...")
+                        for i, d in enumerate(dates):
+                            kdf_d, used = krx_api.fetch_near(krx_api.fetch_stock_daily, d)
+                            if used is None:
+                                continue
+                            idx_d, _ = krx_api.fetch_near(krx_api.fetch_kospi_index, used)
+                            if idx_d is None or idx_d.empty:
+                                continue
+                            fin = fin_by_year.get(equity.fiscal_year_for(d))
+                            if fin is None or fin.empty:
+                                continue
+                            pbr = equity.aggregate_pbr(kdf_d, fin, cmap)
+                            if pd.notna(pbr):
+                                rows.append({"날짜": pd.to_datetime(used),
+                                             "지수": float(idx_d["지수"].iloc[0]),
+                                             "PBR": pbr})
+                            pb.progress((i + 1) / len(dates),
+                                        text=f"시점별 수집 중... {used} ({i+1}/{len(dates)})")
+                        pb.empty()
+
+                        if not rows:
+                            st.error("수집된 시점이 없습니다. 기간을 줄여 다시 시도해보세요.")
+                        else:
+                            got = pd.DataFrame(rows).sort_values("날짜").reset_index(drop=True)
+                            journal.save_table(got, "roe_pbr_index")
+                            st.session_state["idx_api"] = got
+                            st.success(f"{len(got)}개 시점을 수집했습니다.")
+                    except PermissionError as e:
+                        st.error(str(e))
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"수집 중 오류: {e}")
+
+                idf = st.session_state.get("idx_api")
+                if idf is None:
+                    saved2 = journal.load_table("roe_pbr_index")
+                    if saved2 is not None and not saved2.empty:
+                        idf = saved2.copy()
+                        idf["날짜"] = pd.to_datetime(idf["날짜"], errors="coerce")
+                        st.info("이전에 수집한 자료를 보여줍니다. 위 버튼으로 갱신하세요.")
+
+        # ===== 파일 업로드 =====
+        if src2 == "파일 업로드":
+            up2 = st.file_uploader(
+                "KRX 주가지수 'PER/PBR/배당수익률' 기간 자료 (엑셀 또는 CSV)",
+                type=["xlsx", "xls", "csv"], key="up_index",
+            )
+
         if up2 is not None:
             try:
                 raw2 = equity.read_table(up2)
@@ -580,7 +662,7 @@ with tab_roepbr:
                            + ("" if ok else f" (보관 실패: {err})"))
             except Exception as e:  # noqa: BLE001
                 st.error(f"파일을 읽지 못했습니다: {e}")
-        else:
+        elif src2 == "파일 업로드":
             saved2 = journal.load_table("roe_pbr_index")
             if saved2 is not None and not saved2.empty:
                 idf = saved2
@@ -589,7 +671,7 @@ with tab_roepbr:
                 st.info("이전에 올린 자료를 사용 중입니다. 새 파일을 올리면 갱신됩니다.")
 
         if idf is None or idf.empty:
-            st.warning("아직 자료가 없습니다. 아래 안내대로 KRX에서 받아 올려주세요.")
+            st.warning("아직 자료가 없습니다. 위에서 API로 불러오거나 파일을 올려주세요.")
         else:
             try:
                 fit2 = equity.regress(idf["PBR"], idf["지수"])
