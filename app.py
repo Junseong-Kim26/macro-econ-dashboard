@@ -442,9 +442,104 @@ with tab_roepbr:
 
             view = st.radio(
                 "보기 방식",
-                ["개별 종목", "ROE 구간 평균 (추세 뚜렷)"],
+                ["개별 종목", "ROE 구간 평균 (추세 뚜렷)", "🎯 4분면 분석"],
                 horizontal=True, key="roepbr_view",
             )
+
+            # ---- 4분면 분석 (수익성 × 밸류에이션) ----
+            if view.startswith("🎯"):
+                q1, q2 = st.columns(2)
+                cut_mode = q1.radio("기준선", ["중앙값 (시장 대비)", "직접 지정"],
+                                    key="q_cut_mode")
+                if cut_mode == "직접 지정":
+                    rc = q2.number_input("ROE 기준 (%)", value=10.0, step=1.0)
+                    pc = q2.number_input("PBR 기준 (배)", value=1.0, step=0.1)
+                else:
+                    rc = pc = None
+                    q2.caption("분석 대상의 ROE·PBR 중앙값을 기준선으로 씁니다. "
+                               "즉 '시장 평균보다 좋은가/싼가'로 나눕니다.")
+
+                try:
+                    qd, roe_cut, pbr_cut = equity.quadrants(use, rc, pc)
+
+                    c1, c2 = st.columns(2)
+                    c1.metric("ROE 기준선", f"{roe_cut:.2f} %")
+                    c2.metric("PBR 기준선", f"{pbr_cut:.2f} 배")
+
+                    figq = go.Figure()
+                    for qname in equity.QUADRANT_ORDER:
+                        sub = qd[qd["분면"] == qname]
+                        if sub.empty:
+                            continue
+                        info = equity.QUADRANT_INFO[qname]
+                        figq.add_trace(go.Scatter(
+                            x=sub["ROE"], y=sub["PBR"], mode="markers",
+                            name=f"{qname} ({len(sub)})",
+                            marker=dict(size=8, color=info["color"], opacity=0.75),
+                            text=sub["종목명"],
+                            hovertemplate="%{text}<br>ROE %{x:.2f}%<br>PBR %{y:.2f}"
+                                          "<extra></extra>"))
+
+                    # 기준선
+                    figq.add_vline(x=roe_cut, line_dash="dash", line_color="gray")
+                    figq.add_hline(y=pbr_cut, line_dash="dash", line_color="gray")
+
+                    # 각 분면 이름을 모서리에 표시
+                    xr = [qd["ROE"].min(), qd["ROE"].max()]
+                    yr = [qd["PBR"].min(), qd["PBR"].max()]
+                    corners = [
+                        (equity.Q_GOOD_CHEAP, xr[1], yr[0], "right", "bottom"),
+                        (equity.Q_GOOD_RICH, xr[1], yr[1], "right", "top"),
+                        (equity.Q_WEAK_CHEAP, xr[0], yr[0], "left", "bottom"),
+                        (equity.Q_WEAK_RICH, xr[0], yr[1], "left", "top"),
+                    ]
+                    for qname, xa, ya, xanc, yanc in corners:
+                        figq.add_annotation(
+                            x=xa, y=ya, text=f"<b>{qname}</b>", showarrow=False,
+                            xanchor=xanc, yanchor=yanc,
+                            font=dict(size=12, color=equity.QUADRANT_INFO[qname]["color"]),
+                            bgcolor="rgba(255,255,255,0.65)")
+
+                    figq.update_layout(
+                        height=520, margin=dict(l=50, r=20, t=30, b=40),
+                        xaxis_title="ROE (%) — 수익성 →",
+                        yaxis_title="PBR (배) — 밸류에이션 ↑",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                    xanchor="left", x=0))
+                    st.plotly_chart(figq, use_container_width=True)
+
+                    # 분면별 설명 + 종목 목록
+                    st.markdown("##### 각 분면의 뜻과 해당 종목")
+                    for qname in equity.QUADRANT_ORDER:
+                        info = equity.QUADRANT_INFO[qname]
+                        sub = qd[qd["분면"] == qname].sort_values(
+                            "시가총액" if "시가총액" in qd.columns else "ROE",
+                            ascending=False)
+                        st.markdown(
+                            f"<div style='background:{info['color']}22;"
+                            f"border-left:5px solid {info['color']};"
+                            f"padding:10px 14px;margin:6px 0;border-radius:6px;'>"
+                            f"<b>{qname}</b> · {info['pos']} · <b>{len(sub)}개</b><br>"
+                            f"{info['desc']}</div>", unsafe_allow_html=True)
+                        if not sub.empty:
+                            with st.expander(f"{qname} 종목 보기 ({len(sub)}개)"):
+                                cols = ["종목명", "ROE", "PBR"]
+                                if "시가총액" in sub.columns:
+                                    show = sub[cols + ["시가총액"]].copy()
+                                    show["시가총액(억)"] = (show["시가총액"] / 1e8).round(0)
+                                    show = show.drop(columns=["시가총액"])
+                                else:
+                                    show = sub[cols].copy()
+                                st.dataframe(show.round(2), use_container_width=True,
+                                             hide_index=True)
+
+                    st.download_button(
+                        "⬇️ 4분면 분류 CSV",
+                        qd.to_csv(index=False).encode("utf-8-sig"),
+                        "ROE_PBR_4분면.csv", "text/csv", key="q_dl")
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"4분면 계산 중 문제: {e}")
+                use = None   # 아래 개별 종목 화면은 생략
 
             # ---- ROE 구간 평균 보기 ----
             if view.startswith("ROE 구간"):

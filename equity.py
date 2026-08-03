@@ -209,6 +209,66 @@ def filter_outliers(df, pbr_max=10.0, roe_min=-50.0, roe_max=100.0):
     return out.reset_index(drop=True), n0 - len(out)
 
 
+# ---------------------------------------------------------------------------
+# ROE·PBR 4분면 (수익성 × 밸류에이션)
+# ---------------------------------------------------------------------------
+Q_GOOD_CHEAP = "저평가 우량주"
+Q_GOOD_RICH = "프리미엄 우량주"
+Q_WEAK_CHEAP = "저수익 저평가"
+Q_WEAK_RICH = "고평가 주의"
+
+QUADRANT_INFO = {
+    Q_GOOD_CHEAP: {
+        "pos": "고ROE · 저PBR",
+        "color": "#1a9850",
+        "desc": "돈은 잘 버는데 싸게 거래되는 구간. 네 분면 중 가장 매력적이며, "
+                "가치투자에서 1차 관심 대상입니다. 다만 싼 이유(지배구조·업황 등)가 "
+                "있는지 확인이 필요합니다.",
+    },
+    Q_GOOD_RICH: {
+        "pos": "고ROE · 고PBR",
+        "color": "#4575b4",
+        "desc": "우량하지만 이미 비싼 구간. 성장이 계속되면 정당화되지만, "
+                "기대가 꺾이면 조정폭이 큽니다. 실적 추세를 함께 봐야 합니다.",
+    },
+    Q_WEAK_CHEAP: {
+        "pos": "저ROE · 저PBR",
+        "color": "#fdae61",
+        "desc": "싸지만 수익성이 낮은 구간. 흔히 말하는 '밸류 트랩'이 숨어 있어, "
+                "자산가치나 turnaround 근거가 없으면 오래 싼 채로 머무를 수 있습니다.",
+    },
+    Q_WEAK_RICH: {
+        "pos": "저ROE · 고PBR",
+        "color": "#d73027",
+        "desc": "수익성은 낮은데 비싼 구간. 미래 기대가 선반영된 상태로 "
+                "네 분면 중 위험이 가장 큽니다. 기대가 실적으로 확인되는지가 관건입니다.",
+    },
+}
+
+# 화면에 보여줄 순서 (매력적인 것부터)
+QUADRANT_ORDER = [Q_GOOD_CHEAP, Q_GOOD_RICH, Q_WEAK_CHEAP, Q_WEAK_RICH]
+
+
+def quadrants(df, roe_cut=None, pbr_cut=None):
+    """ROE·PBR을 기준선으로 4분면 분류.
+
+    기준선을 안 주면 분석 대상의 중앙값을 쓴다(시장 대비 상대 평가).
+    반환: (분면 컬럼이 붙은 DataFrame, roe_cut, pbr_cut)
+    """
+    d = df.copy()
+    roe_cut = float(d["ROE"].median()) if roe_cut is None else float(roe_cut)
+    pbr_cut = float(d["PBR"].median()) if pbr_cut is None else float(pbr_cut)
+
+    hi_roe = d["ROE"] >= roe_cut
+    hi_pbr = d["PBR"] >= pbr_cut
+    d["분면"] = np.select(
+        [hi_roe & ~hi_pbr, hi_roe & hi_pbr, ~hi_roe & ~hi_pbr, ~hi_roe & hi_pbr],
+        [Q_GOOD_CHEAP, Q_GOOD_RICH, Q_WEAK_CHEAP, Q_WEAK_RICH],
+        default="",
+    )
+    return d, roe_cut, pbr_cut
+
+
 def fiscal_year_for(date, month_cutoff=4):
     """그 시점에 이미 공시되어 있었을 '가장 최근 사업연도'를 고른다.
 
