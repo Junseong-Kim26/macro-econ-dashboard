@@ -16,14 +16,20 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import config
+import dart_api
 import data as data_mod
 import equity
 import journal
+import krx_api
 import scoring
 
 load_dotenv()
 
 st.set_page_config(page_title="거시경제 대시보드", page_icon="📊", layout="wide")
+
+
+class _SkipIndividual(Exception):
+    """ROE 구간 평균 보기일 때 개별 종목 화면을 건너뛰기 위한 내부 신호."""
 
 
 # ---------------------------------------------------------------------------
@@ -297,12 +303,82 @@ with tab_roepbr:
 
     # ---------------- 종목별 ROE vs PBR ----------------
     with sub1:
-        up = st.file_uploader(
-            "KRX 'PER/PBR/배당수익률' 종목별 자료 (엑셀 또는 CSV)",
-            type=["xlsx", "xls", "csv"], key="up_stocks",
+        has_api = bool(krx_api.get_key()) and bool(dart_api.get_key())
+        src = st.radio(
+            "데이터 가져오는 방법",
+            ["API 자동 수집", "파일 업로드"],
+            horizontal=True,
+            index=0 if has_api else 1,
+            key="roepbr_src",
         )
 
         sdf = None
+
+        # ===== API 자동 수집 =====
+        if src == "API 자동 수집":
+            if not has_api:
+                st.error(
+                    "API 키가 없습니다. `.env`(로컬) 또는 Streamlit Secrets에 "
+                    "`KRX_API_KEY`, `DART_API_KEY` 를 넣어주세요.")
+            else:
+                a1, a2 = st.columns(2)
+                year = a1.number_input("재무 기준 사업연도", 2015,
+                                       pd.Timestamp.today().year,
+                                       pd.Timestamp.today().year - 1, step=1)
+                rname = a2.selectbox("보고서", list(dart_api.REPRT.keys()), index=0)
+                rcode = dart_api.REPRT[rname]
+                ann = st.checkbox(
+                    "분기 순이익을 연환산해서 ROE 계산", value=True,
+                    help="분기·반기 보고서는 누적 순이익이라, 연간 기준으로 환산해야 "
+                         "ROE를 연율로 비교할 수 있습니다.")
+
+                if st.button("🔄 API로 불러오기", type="primary"):
+                    try:
+                        with st.spinner("KRX에서 시가총액을 받는 중..."):
+                            kdf, basdd = krx_api.fetch_latest_stock_daily()
+                        st.caption(f"KRX 기준일: {basdd} · {len(kdf):,}개 종목")
+
+                        with st.spinner("DART 기업코드 매핑을 받는 중..."):
+                            cmap = dart_api.load_corp_map()
+
+                        codes = [cmap[c] for c in kdf["종목코드"] if c in cmap]
+                        bar = st.progress(0.0, text="DART 재무 조회 중...")
+                        fin = dart_api.fetch_financials(
+                            codes, int(year), rcode,
+                            progress=lambda d, t: bar.progress(
+                                d / t, text=f"DART 재무 조회 중... {d}/{t}"))
+                        bar.empty()
+
+                        annf = ((lambda p: dart_api.annualize_profit(p, rcode))
+                                if ann else None)
+                        built = equity.build_from_api(kdf, fin, cmap, annualize=annf)
+                        if built.empty:
+                            st.error("결합 결과가 비었습니다. 연도·보고서를 바꿔보세요.")
+                        else:
+                            journal.save_table(built, "roe_pbr_stocks")
+                            st.session_state["roepbr_api"] = built
+                            st.success(f"{len(built):,}개 종목 완성 "
+                                       f"(KRX {basdd} 시총 ÷ DART {year}년 {rname})")
+                    except PermissionError as e:
+                        st.error(str(e))
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"수집 중 오류: {e}")
+
+                sdf = st.session_state.get("roepbr_api")
+                if sdf is None:
+                    saved = journal.load_table("roe_pbr_stocks")
+                    if saved is not None and not saved.empty:
+                        sdf = saved
+                        st.info("이전에 수집한 자료를 보여줍니다. 위 버튼으로 갱신하세요.")
+
+        # ===== 파일 업로드 =====
+        up = None
+        if src == "파일 업로드":
+            up = st.file_uploader(
+                "KRX 'PER/PBR/배당수익률' 종목별 자료 (엑셀 또는 CSV)",
+                type=["xlsx", "xls", "csv"], key="up_stocks",
+            )
+
         if up is not None:
             try:
                 raw = equity.read_table(up)
@@ -312,26 +388,91 @@ with tab_roepbr:
                            + ("" if ok else f" (보관 실패: {err})"))
             except Exception as e:  # noqa: BLE001
                 st.error(f"파일을 읽지 못했습니다: {e}")
-        else:
+        elif src == "파일 업로드":
             saved = journal.load_table("roe_pbr_stocks")
             if saved is not None and not saved.empty:
                 sdf = saved
                 st.info("이전에 올린 자료를 사용 중입니다. 새 파일을 올리면 갱신됩니다.")
 
         if sdf is None or sdf.empty:
-            st.warning("아직 자료가 없습니다. 아래 안내대로 KRX에서 받아 올려주세요.")
+            st.warning("아직 자료가 없습니다. 위에서 API로 불러오거나 파일을 올려주세요.")
         else:
+            # --- 이상치 필터 (자본잠식 기업이 회귀선을 왜곡하는 것을 방지) ---
+            with st.expander("⚙️ 분석 범위 설정", expanded=False):
+                fc1, fc2 = st.columns(2)
+                pbr_max = fc1.slider("PBR 상한 (배)", 1.0, 50.0, 10.0, step=1.0)
+                roe_rng = fc2.slider("ROE 범위 (%)", -200.0, 200.0, (-50.0, 100.0),
+                                     step=10.0)
+                st.caption(
+                    "자본이 거의 잠식된 회사는 PBR이 수백 배, ROE가 ±수백 %로 나와 "
+                    "소수 종목이 회귀선을 통째로 끌고 갑니다. 기본값을 권장합니다."
+                )
+
+            filt, dropped = equity.filter_outliers(sdf, pbr_max, roe_rng[0], roe_rng[1])
+            if dropped:
+                st.caption(f"극단값 {dropped}개 종목을 분석에서 제외했습니다.")
+
             # 시가총액이 있으면 상위 N개만 (코스피200 근사)
-            if "시가총액" in sdf.columns and sdf["시가총액"].notna().any():
+            if "시가총액" in filt.columns and filt["시가총액"].notna().any():
                 topn = st.slider("시가총액 상위 몇 개 종목으로 분석할까요?",
-                                 30, min(500, len(sdf)), min(200, len(sdf)), step=10)
-                use = sdf.nlargest(topn, "시가총액").reset_index(drop=True)
+                                 30, max(30, min(500, len(filt))),
+                                 min(200, len(filt)), step=10)
+                use = filt.nlargest(topn, "시가총액").reset_index(drop=True)
                 st.caption(f"시가총액 상위 {topn}개 종목으로 분석합니다 (코스피200 근사).")
             else:
-                use = sdf.reset_index(drop=True)
-                st.caption(f"업로드한 {len(use)}개 종목 전체로 분석합니다.")
+                use = filt.reset_index(drop=True)
+                st.caption(f"{len(use)}개 종목 전체로 분석합니다.")
+
+            view = st.radio(
+                "보기 방식",
+                ["개별 종목", "ROE 구간 평균 (추세 뚜렷)"],
+                horizontal=True, key="roepbr_view",
+            )
+
+            # ---- ROE 구간 평균 보기 ----
+            if view.startswith("ROE 구간"):
+                nbin = st.slider("구간 개수", 4, 12, 8)
+                g = equity.bin_by_roe(use, nbin)
+                try:
+                    gfit = equity.regress(g["ROE"], g["PBR"])
+                    b1, b2, b3 = st.columns(3)
+                    b1.metric("회귀식",
+                              f"PBR = {gfit['slope']:.4f}×ROE + {gfit['intercept']:.3f}")
+                    b2.metric("설명력 R²", f"{gfit['r2']:.3f}")
+                    b3.metric("구간 수", f"{gfit['n']}개")
+
+                    figg = go.Figure()
+                    figg.add_trace(go.Scatter(
+                        x=g["ROE"], y=g["PBR"], mode="markers+text", name="구간 중앙값",
+                        marker=dict(size=14, color="#2ca02c"),
+                        text=[f"{n}개" for n in g["종목수"]], textposition="top center",
+                        hovertemplate="ROE %{x:.1f}%<br>PBR %{y:.2f}<extra></extra>"))
+                    gx, gy = equity.fit_line(gfit, g["ROE"])
+                    figg.add_trace(go.Scatter(x=gx, y=gy, mode="lines", name="회귀선",
+                                              line=dict(width=3, color="#e74c3c")))
+                    figg.update_layout(
+                        height=420, margin=dict(l=50, r=20, t=30, b=40),
+                        xaxis_title="ROE (%) — 구간 중앙값",
+                        yaxis_title="PBR (배) — 구간 중앙값",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                    xanchor="left", x=0))
+                    st.plotly_chart(figg, use_container_width=True)
+                    st.dataframe(g.round(2), use_container_width=True, hide_index=True)
+                    st.info(
+                        "종목을 ROE 순으로 같은 개수씩 묶어 중앙값을 찍은 그림입니다. "
+                        "개별 종목의 잡음이 상쇄돼 **ROE가 높을수록 PBR이 높다**는 추세가 "
+                        "선명하게 보입니다.\n\n"
+                        "⚠️ 여기의 R²는 **구간 평균끼리의 설명력**입니다. "
+                        "개별 종목을 맞히는 정확도가 아니라는 점에 유의하세요 "
+                        "(개별 종목 기준 R²는 '개별 종목' 보기에 표시됩니다)."
+                    )
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"구간 계산 중 문제: {e}")
+                use = None   # 개별 종목 화면은 건너뛴다
 
             try:
+                if use is None:
+                    raise _SkipIndividual
                 fit = equity.regress(use["ROE"], use["PBR"])
                 res = equity.with_residuals(use, "ROE", "PBR", fit)
 
@@ -339,6 +480,12 @@ with tab_roepbr:
                 m1.metric("회귀식", f"PBR = {fit['slope']:.4f}×ROE + {fit['intercept']:.3f}")
                 m2.metric("설명력 R²", f"{fit['r2']:.3f}")
                 m3.metric("표본 수", f"{fit['n']}개")
+                if fit["r2"] < 0.3:
+                    st.caption(
+                        f"R²가 낮은 것은 정상입니다 — 같은 ROE라도 성장기대·업종에 따라 "
+                        f"PBR이 크게 갈리기 때문입니다. 추세를 뚜렷하게 보시려면 위에서 "
+                        f"**'ROE 구간 평균'** 을 선택하세요."
+                    )
 
                 # 종목 강조 선택
                 picked = st.multiselect(
@@ -394,6 +541,8 @@ with tab_roepbr:
                     "⬇️ 분석 결과 CSV",
                     res.to_csv(index=False).encode("utf-8-sig"),
                     "ROE_PBR_분석.csv", "text/csv")
+            except _SkipIndividual:
+                pass          # 구간 평균 보기 중 → 개별 종목 화면 생략
             except Exception as e:  # noqa: BLE001
                 st.error(f"분석 중 문제가 발생했습니다: {e}")
 
@@ -481,7 +630,24 @@ with tab_roepbr:
             except Exception as e:  # noqa: BLE001
                 st.error(f"분석 중 문제가 발생했습니다: {e}")
 
-    with st.expander("📎 KRX에서 자료 받는 방법"):
+    with st.expander("🔑 API 자동 수집 설정 방법"):
+        st.markdown(
+            "ROE·PBR은 **두 곳의 자료를 합쳐** 계산합니다. "
+            "KRX OpenAPI에는 재무지표(PER/PBR/EPS/BPS)가 없기 때문입니다.\n\n"
+            "| 출처 | 받는 것 | 키 발급 |\n"
+            "|---|---|---|\n"
+            "| KRX OpenAPI | 시가총액·주가·지수 | openapi.krx.co.kr |\n"
+            "| DART (금감원) | 자본총계·당기순이익 | opendart.fss.or.kr |\n\n"
+            "- **PBR** = 시가총액 ÷ 자본총계  ·  **ROE** = 당기순이익 ÷ 자본총계 × 100\n"
+            "- KRX는 **서비스별 이용신청**이 필요합니다. "
+            "`유가증권 일별매매정보`, `KOSPI 시리즈 일별시세정보` 두 개를 신청·승인받으세요. "
+            "(승인 전에는 401 오류)\n"
+            "- 키는 로컬 `.env` 또는 Streamlit Secrets에 "
+            "`KRX_API_KEY`, `DART_API_KEY` 로 넣습니다.\n"
+            "- 재무는 분기 단위라 **최근 확정 보고서**(예: 직전 사업연도)를 고르는 게 안전합니다."
+        )
+
+    with st.expander("📎 (대안) KRX에서 파일 받는 방법"):
         st.markdown(
             "**data.krx.co.kr** 접속 → 로그인 (2025년 12월부터 회원가입 필수)\n\n"
             "**① 종목별 자료**\n"

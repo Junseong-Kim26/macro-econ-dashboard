@@ -149,6 +149,85 @@ def parse_index(df):
 
 
 # ---------------------------------------------------------------------------
+# API 결합 (KRX 시가총액 + DART 재무) → parse_stocks 와 같은 스키마
+# ---------------------------------------------------------------------------
+def build_from_api(krx_df, dart_df, corp_map, annualize=None):
+    """KRX 시세 + DART 재무를 합쳐 종목명·ROE·PBR·시가총액 표를 만든다.
+
+    PBR = 시가총액 ÷ 자본총계,  ROE = 당기순이익 ÷ 자본총계 × 100
+    (KRX 시가총액과 DART 재무 모두 '원' 단위라 그대로 나눈다.)
+    """
+    df = krx_df.copy()
+    df["corp_code"] = df["종목코드"].map(corp_map)
+    df = df.dropna(subset=["corp_code"])
+
+    merged = df.merge(dart_df, on="corp_code", how="inner")
+    merged["자본총계"] = pd.to_numeric(merged["자본총계"], errors="coerce")
+    merged["당기순이익"] = pd.to_numeric(merged["당기순이익"], errors="coerce")
+
+    if annualize is not None:
+        merged["당기순이익"] = merged["당기순이익"].apply(annualize)
+
+    # 자본잠식(자본총계<=0)은 PBR·ROE 해석이 불가 → 제외
+    merged = merged[merged["자본총계"] > 0]
+
+    out = pd.DataFrame({
+        "종목명": merged["종목명"],
+        "PBR": merged["시가총액"] / merged["자본총계"],
+        "ROE": merged["당기순이익"] / merged["자본총계"] * 100.0,
+        "시가총액": merged["시가총액"],
+    })
+    out = out.replace([np.inf, -np.inf], np.nan)
+    out = out[(out["PBR"] > 0) & out["ROE"].notna()]
+    return out.reset_index(drop=True)
+
+
+def aggregate_pbr(krx_df, dart_df, corp_map):
+    """시장 전체 PBR = Σ시가총액 ÷ Σ자본총계 (구성종목 합산)."""
+    df = krx_df.copy()
+    df["corp_code"] = df["종목코드"].map(corp_map)
+    merged = df.dropna(subset=["corp_code"]).merge(dart_df, on="corp_code", how="inner")
+    merged["자본총계"] = pd.to_numeric(merged["자본총계"], errors="coerce")
+    merged = merged[merged["자본총계"] > 0]
+    if merged.empty:
+        return np.nan
+    return float(merged["시가총액"].sum() / merged["자본총계"].sum())
+
+
+def filter_outliers(df, pbr_max=10.0, roe_min=-50.0, roe_max=100.0):
+    """회귀를 왜곡하는 극단값을 걸러낸다.
+
+    자본이 거의 잠식된 회사는 PBR이 수백~수천 배, ROE가 ±수백 %로 나와
+    소수의 종목이 회귀선을 통째로 끌고 간다(R²≈0). 실제 값이지만
+    '같은 ROE면 PBR이 얼마나 되는가'라는 질문에는 방해가 되므로 제외한다.
+
+    반환: (걸러진 DataFrame, 제외된 개수)
+    """
+    n0 = len(df)
+    out = df[(df["PBR"] > 0) & (df["PBR"] <= pbr_max)
+             & (df["ROE"] >= roe_min) & (df["ROE"] <= roe_max)]
+    return out.reset_index(drop=True), n0 - len(out)
+
+
+def bin_by_roe(df, nbin=8, stat="median"):
+    """ROE를 같은 개수씩 구간으로 나눠 대표값(중앙값)을 낸다.
+
+    개별 종목은 성장기대·업종·리스크 때문에 같은 ROE라도 PBR이 크게 흩어진다.
+    구간별로 묶으면 그 잡음이 상쇄되어 'ROE↑ → PBR↑' 추세가 선명해진다.
+    (단, 이 R²는 '구간 평균의 설명력'이지 개별 종목 예측력이 아니다.)
+    """
+    d = df[["ROE", "PBR"]].dropna()
+    if len(d) < nbin * 2:
+        nbin = max(3, len(d) // 3)
+    d = d.copy()
+    d["_q"] = pd.qcut(d["ROE"], nbin, duplicates="drop")
+    g = (d.groupby("_q", observed=True)
+           .agg(ROE=("ROE", stat), PBR=("PBR", stat), 종목수=("PBR", "size"))
+           .reset_index(drop=True))
+    return g.dropna().reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
 # 회귀분석
 # ---------------------------------------------------------------------------
 def regress(x, y):
