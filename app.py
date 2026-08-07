@@ -317,6 +317,8 @@ with tab_roepbr:
 
     mkt = st.radio("시장 선택", list(krx_api.MARKETS.keys()),
                    horizontal=True, key="roepbr_market")
+    if krx_api.MARKETS[mkt].get("note"):
+        st.caption(f"ℹ️ {krx_api.MARKETS[mkt]['note']}")
     KEY_STOCKS = f"roe_pbr_stocks_{mkt}"
     KEY_INDEX = f"roe_pbr_index_{mkt}"
 

@@ -33,10 +33,17 @@ MARKETS = {
         "index": ("idx", "kospi_dd_trd"),
         "index_name": "코스피",
     },
-    "코스닥": {
+    # 코스닥은 전체 1,800여 종목 중 상당수가 적자·소형주라 대표성이 떨어져
+    # 코스닥150을 대상으로 한다.
+    #  ※ KRX OpenAPI에는 '지수 구성종목' 서비스가 없어 실제 150개 명단을 받을 수 없다.
+    #     그래서 시가총액 상위 150개로 근사한다(지수값은 진짜 '코스닥 150'을 사용).
+    "코스닥150": {
         "stock": ("sto", "ksq_bydd_trd"),
         "index": ("idx", "kosdaq_dd_trd"),
-        "index_name": "코스닥",
+        "index_name": "코스닥 150",
+        "top_n": 150,
+        "note": "구성종목 명단은 API로 제공되지 않아 시가총액 상위 150개로 근사했습니다. "
+                "지수값은 실제 '코스닥 150' 지수입니다.",
     },
 }
 DEFAULT_MARKET = "코스피"
@@ -148,7 +155,13 @@ def fetch_stock_daily(bas_dd, key=None, market=DEFAULT_MARKET):
         out["상장주식수"] = _to_num(shrs)
     out["기준일"] = bas_dd
 
-    return out[out["시가총액"] > 0].reset_index(drop=True)
+    out = out[out["시가총액"] > 0].reset_index(drop=True)
+
+    # 코스닥150처럼 상위 N개만 쓰는 시장은 여기서 잘라낸다
+    top_n = MARKETS[market].get("top_n")
+    if top_n:
+        out = out.nlargest(top_n, "시가총액").reset_index(drop=True)
+    return out
 
 
 def fetch_index(bas_dd, key=None, market=DEFAULT_MARKET, index_name=None):
