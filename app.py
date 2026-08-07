@@ -398,6 +398,8 @@ with tab_roepbr:
                                        f"(KRX {basdd} 시총 ÷ DART {year}년 {rname})")
                     except PermissionError as e:
                         st.error(str(e))
+                    except dart_api.DartUnreachable as e:
+                        st.error(str(e))
                     except Exception as e:  # noqa: BLE001
                         st.error(f"수집 중 오류: {e}")
 
@@ -789,6 +791,8 @@ with tab_roepbr:
                             st.session_state[f"idx_api_{mkt}"] = got
                             st.success(f"{len(got)}개 시점을 수집했습니다.")
                     except PermissionError as e:
+                        st.error(str(e))
+                    except dart_api.DartUnreachable as e:
                         st.error(str(e))
                     except Exception as e:  # noqa: BLE001
                         st.error(f"수집 중 오류: {e}")

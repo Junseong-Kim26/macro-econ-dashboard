@@ -22,6 +22,29 @@ import requests
 
 BASE = "https://opendart.fss.or.kr/api"
 
+# (연결, 읽기) 타임아웃. 연결은 짧게 잡아 막혔을 때 빨리 알아채도록 한다.
+TIMEOUT = (10, 120)
+
+UNREACHABLE_MSG = (
+    "DART 서버에 연결하지 못했습니다.\n\n"
+    "**Streamlit Cloud(해외 서버)에서는 DART API 접속이 차단됩니다.** "
+    "KRX는 되지만 DART만 막힙니다.\n\n"
+    "➡️ **해결법**: 내 PC에서 대시보드를 실행해 `API로 불러오기` 를 누르세요. "
+    "수집 결과가 Dropbox에 저장되어, 이 클라우드 화면에서도 그대로 보입니다."
+)
+
+
+class DartUnreachable(RuntimeError):
+    """DART에 네트워크로 닿지 못했을 때(해외 IP 차단 등)."""
+
+
+def _get(url, params, timeout=TIMEOUT):
+    """DART 호출 공통 래퍼 — 연결 실패를 알아보기 쉬운 예외로 바꾼다."""
+    try:
+        return requests.get(url, params=params, timeout=timeout)
+    except (requests.ConnectionError, requests.Timeout) as e:
+        raise DartUnreachable(UNREACHABLE_MSG) from e
+
 # 보고서 코드
 REPRT = {
     "사업보고서(연간)": "11011",
@@ -51,7 +74,7 @@ def load_corp_map(key=None, timeout=60):
     if not key:
         raise ValueError("DART_API_KEY 가 없습니다.")
 
-    r = requests.get(f"{BASE}/corpCode.xml", params={"crtfc_key": key}, timeout=timeout)
+    r = _get(f"{BASE}/corpCode.xml", {"crtfc_key": key}, timeout=(10, timeout))
     r.raise_for_status()
 
     # 오류일 때는 zip이 아니라 JSON/XML 메시지가 온다
@@ -112,7 +135,7 @@ def fetch_financials(corp_codes, year, reprt_code, key=None,
             "bsns_year": str(year),
             "reprt_code": reprt_code,
         }
-        r = requests.get(f"{BASE}/fnlttMultiAcnt.json", params=params, timeout=timeout)
+        r = _get(f"{BASE}/fnlttMultiAcnt.json", params, timeout=(10, timeout))
         r.raise_for_status()
         js = r.json()
 
