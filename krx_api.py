@@ -32,6 +32,7 @@ MARKETS = {
         "stock": ("sto", "stk_bydd_trd"),
         "index": ("idx", "kospi_dd_trd"),
         "index_name": "코스피",
+        "index_options": ["코스피"],
     },
     # 코스닥은 전체 1,800여 종목 중 상당수가 적자·소형주라 대표성이 떨어져
     # 코스닥150을 대상으로 한다.
@@ -41,6 +42,8 @@ MARKETS = {
         "stock": ("sto", "ksq_bydd_trd"),
         "index": ("idx", "kosdaq_dd_trd"),
         "index_name": "코스닥 150",
+        # 화면에서 고를 수 있는 지수 (첫 번째가 기본 = 종목 범위와 일치)
+        "index_options": ["코스닥 150", "코스닥"],
         "top_n": 150,
         "note": "구성종목 명단은 API로 제공되지 않아 시가총액 상위 150개로 근사했습니다. "
                 "지수값은 실제 '코스닥 150' 지수입니다.",

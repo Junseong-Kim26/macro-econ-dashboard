@@ -63,6 +63,47 @@ def fmt(value, decimals, unit):
     return f"{value:,.{decimals}f}{unit}"
 
 
+def save_dart_cache(cmap, fin, year, rcode):
+    """DART 재무·기업코드를 Dropbox에 보관 (분기마다 한 번만 갱신하면 됨)."""
+    mdf = pd.DataFrame({"종목코드": list(cmap.keys()), "corp_code": list(cmap.values())})
+    journal.save_table(mdf, "dart_corpmap")
+    journal.save_table(fin, f"dart_fin_{year}_{rcode}")
+
+
+def load_dart_cache(year, rcode):
+    """보관해 둔 DART 자료를 읽는다. 없으면 (None, None)."""
+    mdf = journal.load_table("dart_corpmap")
+    fin = journal.load_table(f"dart_fin_{year}_{rcode}")
+    if mdf is None or fin is None or mdf.empty or fin.empty:
+        return None, None
+    cmap = dict(zip(mdf["종목코드"].astype(str).str.zfill(6),
+                    mdf["corp_code"].astype(str).str.zfill(8)))
+    fin["corp_code"] = fin["corp_code"].astype(str).str.zfill(8)
+    return cmap, fin
+
+
+def get_dart(year, rcode, codes_fn, progress=None):
+    """DART 재무를 확보한다.
+
+    ① 직접 조회(로컬에서 됨) → 성공하면 Dropbox에 보관
+    ② 조회 불가(클라우드) → 보관해 둔 자료 사용
+    반환: (corp_map, 재무DF, 안내문 or None)
+    """
+    try:
+        cmap = dart_api.load_corp_map()
+        fin = dart_api.fetch_financials(codes_fn(cmap), int(year), rcode,
+                                        progress=progress)
+        save_dart_cache(cmap, fin, year, rcode)
+        return cmap, fin, None
+    except dart_api.DartUnreachable:
+        cmap, fin = load_dart_cache(year, rcode)
+        if cmap is None:
+            raise
+        return cmap, fin, (
+            f"DART에 직접 접속할 수 없어 **보관된 재무({year}년)** 를 사용했습니다. "
+            "주가·시가총액은 방금 KRX에서 받은 최신 값입니다.")
+
+
 def _q_table(df, keep_quadrant=False):
     """4분면 화면·다운로드에서 공통으로 쓰는 표 모양 정리."""
     cols = (["분면"] if keep_quadrant and "분면" in df.columns else []) + \
@@ -375,16 +416,15 @@ with tab_roepbr:
                             kdf, basdd = krx_api.fetch_latest_stock_daily(market=mkt)
                         st.caption(f"KRX 기준일: {basdd} · {len(kdf):,}개 종목")
 
-                        with st.spinner("DART 기업코드 매핑을 받는 중..."):
-                            cmap = dart_api.load_corp_map()
-
-                        codes = [cmap[c] for c in kdf["종목코드"] if c in cmap]
                         bar = st.progress(0.0, text="DART 재무 조회 중...")
-                        fin = dart_api.fetch_financials(
-                            codes, int(year), rcode,
+                        cmap, fin, note = get_dart(
+                            year, rcode,
+                            lambda m: [m[c] for c in kdf["종목코드"] if c in m],
                             progress=lambda d, t: bar.progress(
                                 d / t, text=f"DART 재무 조회 중... {d}/{t}"))
                         bar.empty()
+                        if note:
+                            st.info(note)
 
                         annf = ((lambda p: dart_api.annualize_profit(p, rcode))
                                 if ann else None)
@@ -731,9 +771,26 @@ with tab_roepbr:
                 st.error("API 키가 없습니다. 위 '종목별' 탭의 안내를 참고하세요.")
             else:
                 st.caption(
-                    "월말마다 **시장 전체 시가총액 ÷ 자본총계**로 코스피 PBR을 계산합니다. "
+                    f"월말마다 **{mkt} 시가총액 합 ÷ 자본총계 합**으로 PBR을 계산합니다. "
                     "각 시점에는 그때 이미 공시돼 있던 재무만 사용합니다."
                 )
+
+                # 어떤 지수를 y축에 놓을지 선택 (코스닥150은 종합지수와 값이 다름)
+                idx_opts = krx_api.MARKETS[mkt].get(
+                    "index_options", [krx_api.MARKETS[mkt]["index_name"]])
+                if len(idx_opts) > 1:
+                    idx_name = st.selectbox(
+                        "표시할 지수", idx_opts, index=0, key="idx_name_sel",
+                        help="종목 범위와 같은 지수를 쓰는 것이 맞지만, "
+                             "익숙한 종합지수로 보고 싶으면 바꾸세요.")
+                    if idx_name != idx_opts[0]:
+                        st.warning(
+                            f"PBR은 **{mkt}** 종목으로 계산되는데 지수는 "
+                            f"**{idx_name}**입니다. 범위가 달라 해석에 주의하세요.")
+                else:
+                    idx_name = idx_opts[0]
+                st.caption(f"y축 지수: **{idx_name}**")
+
                 yb = st.slider("몇 년치를 모을까요?", 1, 6, 3, key="idx_years")
                 st.caption(f"약 {yb*12}개 시점 × 2회 조회 → **{yb*12*4//60}분 내외** 걸립니다.")
 
@@ -744,21 +801,27 @@ with tab_roepbr:
                         today = pd.Timestamp.today().normalize()
                         if not dates or (today - dates[-1]).days > 3:
                             dates.append(today)
-                        cmap = dart_api.load_corp_map()
-
                         # 종목 목록(최근 시점 기준)으로 필요한 사업연도별 재무를 미리 확보
                         with st.spinner("최근 종목 목록을 받는 중..."):
                             latest_k, _ = krx_api.fetch_latest_stock_daily(market=mkt)
-                        codes = [cmap[c] for c in latest_k["종목코드"] if c in cmap]
 
                         years = sorted({equity.fiscal_year_for(d) for d in dates})
                         fin_by_year = {}
+                        cmap = None
+                        notes = []
                         fb = st.progress(0.0, text="DART 재무 준비 중...")
                         for i, y in enumerate(years):
-                            fin_by_year[y] = dart_api.fetch_financials(codes, y, "11011")
+                            cmap, fin_y, note = get_dart(
+                                y, "11011",
+                                lambda m: [m[c] for c in latest_k["종목코드"] if c in m])
+                            fin_by_year[y] = fin_y
+                            if note:
+                                notes.append(note)
                             fb.progress((i + 1) / len(years),
                                         text=f"DART 재무 준비 중... {y}년 ({i+1}/{len(years)})")
                         fb.empty()
+                        if notes:
+                            st.info(notes[0])
 
                         rows = []
                         pb = st.progress(0.0, text="시점별 수집 중...")
@@ -768,7 +831,8 @@ with tab_roepbr:
                             if used is None:
                                 continue
                             idx_d, _ = krx_api.fetch_near(
-                                partial(krx_api.fetch_index, market=mkt), used)
+                                partial(krx_api.fetch_index, market=mkt,
+                                        index_name=idx_name), used)
                             if idx_d is None or idx_d.empty:
                                 continue
                             fin = fin_by_year.get(equity.fiscal_year_for(d))
