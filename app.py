@@ -8,6 +8,7 @@
 
 import os
 import io
+from functools import partial
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -314,7 +315,12 @@ with tab_roepbr:
         "회귀선보다 **아래**면 같은 ROE 대비 PBR이 낮다(상대 저평가)는 뜻입니다."
     )
 
-    sub1, sub2 = st.tabs(["종목별 ROE-PBR", "코스피지수 - PBR"])
+    mkt = st.radio("시장 선택", list(krx_api.MARKETS.keys()),
+                   horizontal=True, key="roepbr_market")
+    KEY_STOCKS = f"roe_pbr_stocks_{mkt}"
+    KEY_INDEX = f"roe_pbr_index_{mkt}"
+
+    sub1, sub2 = st.tabs([f"종목별 ROE-PBR ({mkt})", f"{mkt}지수 - PBR"])
 
     # ---------------- 종목별 ROE vs PBR ----------------
     with sub1:
@@ -364,7 +370,7 @@ with tab_roepbr:
                 if st.button("🔄 API로 불러오기", type="primary"):
                     try:
                         with st.spinner("KRX에서 시가총액을 받는 중..."):
-                            kdf, basdd = krx_api.fetch_latest_stock_daily()
+                            kdf, basdd = krx_api.fetch_latest_stock_daily(market=mkt)
                         st.caption(f"KRX 기준일: {basdd} · {len(kdf):,}개 종목")
 
                         with st.spinner("DART 기업코드 매핑을 받는 중..."):
@@ -384,8 +390,8 @@ with tab_roepbr:
                         if built.empty:
                             st.error("결합 결과가 비었습니다. 연도·보고서를 바꿔보세요.")
                         else:
-                            journal.save_table(built, "roe_pbr_stocks")
-                            st.session_state["roepbr_api"] = built
+                            journal.save_table(built, KEY_STOCKS)
+                            st.session_state[f"roepbr_api_{mkt}"] = built
                             st.success(f"{len(built):,}개 종목 완성 "
                                        f"(KRX {basdd} 시총 ÷ DART {year}년 {rname})")
                     except PermissionError as e:
@@ -393,9 +399,9 @@ with tab_roepbr:
                     except Exception as e:  # noqa: BLE001
                         st.error(f"수집 중 오류: {e}")
 
-                sdf = st.session_state.get("roepbr_api")
+                sdf = st.session_state.get(f"roepbr_api_{mkt}")
                 if sdf is None:
-                    saved = journal.load_table("roe_pbr_stocks")
+                    saved = journal.load_table(KEY_STOCKS)
                     if saved is not None and not saved.empty:
                         sdf = saved
                         st.info("이전에 수집한 자료를 보여줍니다. 위 버튼으로 갱신하세요.")
@@ -412,13 +418,13 @@ with tab_roepbr:
             try:
                 raw = equity.read_table(up)
                 sdf, note = equity.parse_stocks(raw)
-                ok, err = journal.save_table(sdf, "roe_pbr_stocks")
+                ok, err = journal.save_table(sdf, KEY_STOCKS)
                 st.success(f"{len(sdf)}개 종목을 읽었습니다. {note}"
                            + ("" if ok else f" (보관 실패: {err})"))
             except Exception as e:  # noqa: BLE001
                 st.error(f"파일을 읽지 못했습니다: {e}")
         elif src == "파일 업로드":
-            saved = journal.load_table("roe_pbr_stocks")
+            saved = journal.load_table(KEY_STOCKS)
             if saved is not None and not saved.empty:
                 sdf = saved
                 st.info("이전에 올린 자료를 사용 중입니다. 새 파일을 올리면 갱신됩니다.")
@@ -704,7 +710,7 @@ with tab_roepbr:
             except Exception as e:  # noqa: BLE001
                 st.error(f"분석 중 문제가 발생했습니다: {e}")
 
-    # ---------------- 코스피지수 vs PBR ----------------
+    # ---------------- 시장 대표지수 vs PBR ----------------
     with sub2:
         src2 = st.radio(
             "데이터 가져오는 방법",
@@ -738,7 +744,7 @@ with tab_roepbr:
 
                         # 종목 목록(최근 시점 기준)으로 필요한 사업연도별 재무를 미리 확보
                         with st.spinner("최근 종목 목록을 받는 중..."):
-                            latest_k, _ = krx_api.fetch_latest_stock_daily()
+                            latest_k, _ = krx_api.fetch_latest_stock_daily(market=mkt)
                         codes = [cmap[c] for c in latest_k["종목코드"] if c in cmap]
 
                         years = sorted({equity.fiscal_year_for(d) for d in dates})
@@ -753,10 +759,12 @@ with tab_roepbr:
                         rows = []
                         pb = st.progress(0.0, text="시점별 수집 중...")
                         for i, d in enumerate(dates):
-                            kdf_d, used = krx_api.fetch_near(krx_api.fetch_stock_daily, d)
+                            kdf_d, used = krx_api.fetch_near(
+                                partial(krx_api.fetch_stock_daily, market=mkt), d)
                             if used is None:
                                 continue
-                            idx_d, _ = krx_api.fetch_near(krx_api.fetch_kospi_index, used)
+                            idx_d, _ = krx_api.fetch_near(
+                                partial(krx_api.fetch_index, market=mkt), used)
                             if idx_d is None or idx_d.empty:
                                 continue
                             fin = fin_by_year.get(equity.fiscal_year_for(d))
@@ -775,17 +783,17 @@ with tab_roepbr:
                             st.error("수집된 시점이 없습니다. 기간을 줄여 다시 시도해보세요.")
                         else:
                             got = pd.DataFrame(rows).sort_values("날짜").reset_index(drop=True)
-                            journal.save_table(got, "roe_pbr_index")
-                            st.session_state["idx_api"] = got
+                            journal.save_table(got, KEY_INDEX)
+                            st.session_state[f"idx_api_{mkt}"] = got
                             st.success(f"{len(got)}개 시점을 수집했습니다.")
                     except PermissionError as e:
                         st.error(str(e))
                     except Exception as e:  # noqa: BLE001
                         st.error(f"수집 중 오류: {e}")
 
-                idf = st.session_state.get("idx_api")
+                idf = st.session_state.get(f"idx_api_{mkt}")
                 if idf is None:
-                    saved2 = journal.load_table("roe_pbr_index")
+                    saved2 = journal.load_table(KEY_INDEX)
                     if saved2 is not None and not saved2.empty:
                         if "날짜" in saved2.columns:
                             idf = saved2.copy()
@@ -809,13 +817,13 @@ with tab_roepbr:
             try:
                 raw2 = equity.read_table(up2)
                 idf = equity.parse_index(raw2)
-                ok, err = journal.save_table(idf, "roe_pbr_index")
+                ok, err = journal.save_table(idf, KEY_INDEX)
                 st.success(f"{len(idf)}일치 자료를 읽었습니다."
                            + ("" if ok else f" (보관 실패: {err})"))
             except Exception as e:  # noqa: BLE001
                 st.error(f"파일을 읽지 못했습니다: {e}")
         elif src2 == "파일 업로드":
-            saved2 = journal.load_table("roe_pbr_index")
+            saved2 = journal.load_table(KEY_INDEX)
             if saved2 is not None and not saved2.empty:
                 idf = saved2
                 if "날짜" in idf.columns:
@@ -896,7 +904,7 @@ with tab_roepbr:
                 figi.update_layout(
                     height=460, margin=dict(l=60, r=20, t=30, b=40),
                     xaxis_title="PBR (배) — 오른쪽일수록 비쌈",
-                    yaxis_title="코스피지수",
+                    yaxis_title=f"{mkt}지수",
                     legend=dict(orientation="h", yanchor="bottom", y=1.02,
                                 xanchor="left", x=0))
                 st.plotly_chart(figi, use_container_width=True)
@@ -944,7 +952,7 @@ with tab_roepbr:
                 if "날짜" in idf.columns:
                     figt = make_subplots(specs=[[{"secondary_y": True}]])
                     figt.add_trace(go.Scatter(x=idf["날짜"], y=idf["지수"], mode="lines",
-                                              name="코스피지수",
+                                              name=f"{mkt}지수",
                                               line=dict(width=2, color="#1f77b4")), False)
                     figt.add_trace(go.Scatter(x=idf["날짜"], y=idf["PBR"], mode="lines",
                                               name="PBR",
@@ -954,7 +962,7 @@ with tab_roepbr:
                                        hovermode="x unified",
                                        legend=dict(orientation="h", yanchor="bottom",
                                                    y=1.02, xanchor="left", x=0))
-                    figt.update_yaxes(title_text="코스피지수", secondary_y=False)
+                    figt.update_yaxes(title_text=f"{mkt}지수", secondary_y=False)
                     figt.update_yaxes(title_text="PBR (배)", secondary_y=True)
                     st.plotly_chart(figt, use_container_width=True)
             except Exception as e:  # noqa: BLE001

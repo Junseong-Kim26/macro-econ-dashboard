@@ -25,6 +25,22 @@ BASE_URL = "https://data-dbg.krx.co.kr/svc/apis"
 EP_STOCK_DAILY = ("sto", "stk_bydd_trd")   # 유가증권(코스피) 일별매매정보
 EP_KOSPI_INDEX = ("idx", "kospi_dd_trd")   # KOSPI 시리즈 일별시세정보
 
+# 시장별 엔드포인트 — 시장을 추가하려면 여기에 한 줄 넣으면 된다.
+#  ※ KRX는 서비스마다 '이용신청·승인'이 따로 필요하다(미승인 시 401).
+MARKETS = {
+    "코스피": {
+        "stock": ("sto", "stk_bydd_trd"),
+        "index": ("idx", "kospi_dd_trd"),
+        "index_name": "코스피",
+    },
+    "코스닥": {
+        "stock": ("sto", "ksq_bydd_trd"),
+        "index": ("idx", "kosdaq_dd_trd"),
+        "index_name": "코스닥",
+    },
+}
+DEFAULT_MARKET = "코스피"
+
 
 def find_secret(name):
     """환경변수 → Streamlit secrets에서 키를 찾는다.
@@ -93,13 +109,15 @@ def recent_business_day(days_back=10):
     return [(today - dt.timedelta(days=i)).strftime("%Y%m%d") for i in range(days_back)]
 
 
-def fetch_stock_daily(bas_dd, key=None):
-    """코스피 종목 일별매매정보 → DataFrame(종목코드·종목명·종가·시가총액·상장주식수)."""
+def fetch_stock_daily(bas_dd, key=None, market=DEFAULT_MARKET):
+    """시장별 종목 일별매매정보 → DataFrame(종목코드·종목명·종가·시가총액·상장주식수)."""
     key = get_key(key)
     if not key:
         raise ValueError("KRX_API_KEY 가 없습니다.")
+    if market not in MARKETS:
+        raise ValueError(f"알 수 없는 시장: {market}")
 
-    rows = _call(*EP_STOCK_DAILY, bas_dd=bas_dd, key=key)
+    rows = _call(*MARKETS[market]["stock"], bas_dd=bas_dd, key=key)
     if not rows:
         return pd.DataFrame()
 
@@ -133,13 +151,20 @@ def fetch_stock_daily(bas_dd, key=None):
     return out[out["시가총액"] > 0].reset_index(drop=True)
 
 
-def fetch_kospi_index(bas_dd, key=None, index_name="코스피"):
-    """KOSPI 시리즈 일별시세 → 지수명별 종가. index_name 지정 시 그 지수만."""
+def fetch_index(bas_dd, key=None, market=DEFAULT_MARKET, index_name=None):
+    """시장 대표지수 일별시세 → 지수명·지수 종가.
+
+    응답에는 그 시장의 모든 지수(섹터·규모별)가 들어 있어 대표지수만 골라낸다.
+    index_name 을 주면 그 이름으로, 안 주면 시장 기본 지수명으로 찾는다.
+    """
     key = get_key(key)
     if not key:
         raise ValueError("KRX_API_KEY 가 없습니다.")
+    if market not in MARKETS:
+        raise ValueError(f"알 수 없는 시장: {market}")
+    index_name = index_name or MARKETS[market]["index_name"]
 
-    rows = _call(*EP_KOSPI_INDEX, bas_dd=bas_dd, key=key)
+    rows = _call(*MARKETS[market]["index"], bas_dd=bas_dd, key=key)
     if not rows:
         return pd.DataFrame()
 
@@ -155,17 +180,35 @@ def fetch_kospi_index(bas_dd, key=None, index_name="코스피"):
         "기준일": bas_dd,
     }).dropna(subset=["지수"])
 
-    if index_name:
-        exact = out[out["지수명"] == index_name]
-        if not exact.empty:
-            return exact.reset_index(drop=True)
-    return out.reset_index(drop=True)
+    if not index_name:
+        return out.reset_index(drop=True)
+
+    # 1) 정확히 일치
+    exact = out[out["지수명"] == index_name]
+    if not exact.empty:
+        return exact.reset_index(drop=True)
+
+    # 2) 이름을 포함하는 것 중 가장 짧은 것(= 하위지수가 아닌 대표지수)
+    cand = out[out["지수명"].str.contains(index_name, na=False)]
+    if not cand.empty:
+        pick = cand.loc[cand["지수명"].str.len().idxmin()]
+        return pd.DataFrame([pick]).reset_index(drop=True)
+
+    # 3) 못 찾으면 후보를 보여주고 중단 — 엉뚱한 지수를 쓰는 것보다 낫다
+    raise RuntimeError(
+        f"'{index_name}' 지수를 찾지 못했습니다. 응답에 있는 지수명: "
+        f"{', '.join(out['지수명'].head(15))} ...")
+
+
+def fetch_kospi_index(bas_dd, key=None, index_name="코스피"):
+    """(호환용) 예전 이름 — fetch_index 의 코스피 버전."""
+    return fetch_index(bas_dd, key, market="코스피", index_name=index_name)
 
 
 def fetch_near(fetch_fn, date, key=None, back=7):
     """해당 날짜가 휴장일이면 직전 영업일까지 거슬러 시도한다.
 
-    fetch_fn : fetch_stock_daily / fetch_kospi_index
+    fetch_fn : fetch_stock_daily / fetch_index (시장은 partial 로 미리 묶어 전달)
     반환: (DataFrame, 실제 사용된 기준일) — 못 찾으면 (빈 DF, None)
     """
     d = pd.Timestamp(date)
@@ -189,13 +232,13 @@ def month_end_dates(years_back=3, end=None):
     return list(pd.date_range(start, end, freq="ME"))
 
 
-def fetch_latest_stock_daily(key=None, days_back=10):
+def fetch_latest_stock_daily(key=None, days_back=10, market=DEFAULT_MARKET):
     """가장 최근 영업일 데이터를 자동으로 찾아 반환. 반환: (DataFrame, 기준일)."""
     key = get_key(key)
     last_err = None
     for d in recent_business_day(days_back):
         try:
-            df = fetch_stock_daily(d, key)
+            df = fetch_stock_daily(d, key, market=market)
             if not df.empty:
                 return df, d
         except PermissionError:
