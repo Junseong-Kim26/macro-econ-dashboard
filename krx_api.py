@@ -262,18 +262,26 @@ def fetch_sectors(bas_dd, key=None, market=DEFAULT_MARKET, leaf_only=True):
     return out.dropna(subset=["거래대금"]).reset_index(drop=True)
 
 
-def period_end_dates(years_back=3, months=6, end=None):
-    """N개월 간격의 기간 말일 목록(과거→현재). 기본 6개월."""
+def period_end_dates(years_back=3, months=6, weeks=None, end=None):
+    """일정 간격의 시점 목록(과거→현재).
+
+    weeks 를 주면 주 단위(금요일 기준), 아니면 months 단위(월말 기준).
+    아직 오지 않은 날짜는 오늘로 자르고, 마지막이 오늘과 떨어져 있으면 오늘을 덧붙인다.
+    """
     end = pd.Timestamp(end) if end else pd.Timestamp.today().normalize()
     start = end - pd.DateOffset(years=years_back)
-    dates = list(pd.date_range(start, end, freq=pd.DateOffset(months=months)))
-    # 각 시점을 그 달의 말일로 맞추되, 아직 오지 않은 날짜는 오늘로 자른다
-    out = []
-    for d in dates:
-        d = d + pd.offsets.MonthEnd(0) if d.day != d.days_in_month else d
-        out.append(min(d, end))
-    # 마지막이 오늘보다 이르면 오늘(최근 시점)을 덧붙인다
-    if out and (end - out[-1]).days > 20:
+
+    if weeks:
+        # 주간 시점은 그 주의 금요일(주 마지막 거래일)로 잡는다
+        dates = list(pd.date_range(start, end, freq=f"{int(weeks)}W-FRI"))
+        gap_days = 7 * int(weeks)
+    else:
+        dates = [d + pd.offsets.MonthEnd(0) if d.day != d.days_in_month else d
+                 for d in pd.date_range(start, end, freq=pd.DateOffset(months=months))]
+        gap_days = 20
+
+    out = [min(d, end) for d in dates]
+    if out and (end - out[-1]).days > gap_days // 2:
         out.append(end)
     return sorted(set(out))
 

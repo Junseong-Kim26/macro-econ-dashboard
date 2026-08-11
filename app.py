@@ -1119,17 +1119,31 @@ with tab_sector:
                     horizontal=True, key="sector_market")
     SEC_KEY = f"sector_flow_{smkt}"
 
+    # 간격: 주 단위와 월 단위를 함께 제공
+    GAPS = {
+        "1주": ("W", 1), "2주": ("W", 2), "1개월": ("M", 1),
+        "3개월": ("M", 3), "6개월": ("M", 6), "1년": ("M", 12),
+    }
     c1, c2 = st.columns(2)
     syb = c1.slider("몇 년치를 모을까요?", 1, 6, 3, key="sector_years")
-    sgap = c2.selectbox("간격", [6, 3, 12], index=0, key="sector_gap",
-                        format_func=lambda m: f"{m}개월")
+    gap_label = c2.selectbox("간격", list(GAPS.keys()), index=4, key="sector_gap")
+    gap_unit, gap_n = GAPS[gap_label]
+
+    # 예상 시점 수·소요시간 미리 알려주기 (주 단위는 호출이 많아짐)
+    _preview = krx_api.period_end_dates(
+        syb, months=gap_n if gap_unit == "M" else 6,
+        weeks=gap_n if gap_unit == "W" else None)
+    st.caption(f"{gap_label} 간격 · 약 **{len(_preview)}개 시점** "
+               f"(예상 {max(1, round(len(_preview) * 0.15))}초 내외)")
 
     if not krx_api.get_key():
         st.error("KRX_API_KEY 가 없습니다.")
     else:
         if st.button("🔄 업종 자료 불러오기", type="primary", key="sector_fetch"):
             try:
-                dates = krx_api.period_end_dates(syb, sgap)
+                dates = krx_api.period_end_dates(
+                    syb, months=gap_n if gap_unit == "M" else 6,
+                    weeks=gap_n if gap_unit == "W" else None)
                 rows = []
                 pb = st.progress(0.0, text="업종 자료 수집 중...")
                 for i, d in enumerate(dates):
