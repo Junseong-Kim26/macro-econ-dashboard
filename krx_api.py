@@ -216,6 +216,68 @@ def fetch_index(bas_dd, key=None, market=DEFAULT_MARKET, index_name=None):
         f"{', '.join(out['지수명'].head(15))} ...")
 
 
+# ---------------------------------------------------------------------------
+# 업종별 거래대금·시가총액
+# ---------------------------------------------------------------------------
+# KRX 업종지수에는 상위분류가 섞여 있어 그대로 더하면 중복된다.
+#   · '제조' 는 전기전자·화학·기계장비 등의 상위 (검증: 제조 3,984조 = 하위합 3,983조)
+#   · '증권'·'보험' 은 '금융' 의 하위 (금융은 은행 등을 포함해 따로 지수가 없음)
+# 아래 3개를 빼면 합계가 시장 전체의 100.0%(코스피)·99.9%(코스닥)로 맞는다.
+SECTOR_PARENTS = {"제조", "증권", "보험"}
+
+
+def fetch_sectors(bas_dd, key=None, market=DEFAULT_MARKET, leaf_only=True):
+    """업종별 거래대금·시가총액 → DataFrame(업종·거래대금·시가총액·기준일).
+
+    leaf_only=True 면 상위분류(SECTOR_PARENTS)를 빼서 중복 없이 합산되게 한다.
+    """
+    key = get_key(key)
+    if not key:
+        raise ValueError("KRX_API_KEY 가 없습니다.")
+    if market not in MARKETS:
+        raise ValueError(f"알 수 없는 시장: {market}")
+
+    rows = _call(*MARKETS[market]["index"], bas_dd=bas_dd, key=key)
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    need = {"IDX_NM", "ACC_TRDVAL", "MKTCAP"}
+    if not need.issubset(df.columns):
+        raise RuntimeError(f"예상한 필드가 없습니다. 실제 컬럼: {list(df.columns)}")
+
+    out = pd.DataFrame({
+        "업종": df["IDX_NM"].astype(str).str.strip(),
+        "거래대금": _to_num(df["ACC_TRDVAL"]),
+        "시가총액": _to_num(df["MKTCAP"]),
+        "기준일": bas_dd,
+    })
+
+    # 시장 대표지수·규모지수(코스피 200 등)를 빼고 업종지수만 남긴다
+    prefix = "코스피" if MARKETS[market]["index"][1].startswith("kospi") else "코스닥"
+    out = out[~out["업종"].str.startswith(prefix)]
+    if leaf_only:
+        out = out[~out["업종"].isin(SECTOR_PARENTS)]
+
+    return out.dropna(subset=["거래대금"]).reset_index(drop=True)
+
+
+def period_end_dates(years_back=3, months=6, end=None):
+    """N개월 간격의 기간 말일 목록(과거→현재). 기본 6개월."""
+    end = pd.Timestamp(end) if end else pd.Timestamp.today().normalize()
+    start = end - pd.DateOffset(years=years_back)
+    dates = list(pd.date_range(start, end, freq=pd.DateOffset(months=months)))
+    # 각 시점을 그 달의 말일로 맞추되, 아직 오지 않은 날짜는 오늘로 자른다
+    out = []
+    for d in dates:
+        d = d + pd.offsets.MonthEnd(0) if d.day != d.days_in_month else d
+        out.append(min(d, end))
+    # 마지막이 오늘보다 이르면 오늘(최근 시점)을 덧붙인다
+    if out and (end - out[-1]).days > 20:
+        out.append(end)
+    return sorted(set(out))
+
+
 def fetch_kospi_index(bas_dd, key=None, index_name="코스피"):
     """(호환용) 예전 이름 — fetch_index 의 코스피 버전."""
     return fetch_index(bas_dd, key, market="코스피", index_name=index_name)
