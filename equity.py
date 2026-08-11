@@ -294,31 +294,51 @@ def parse_sector_map(df):
             "(필요 컬럼: 종목코드 또는 종목명, 업종명)")
 
     c_code, c_name = find_col(df, "종목코드"), find_col(df, "종목명")
-    out = pd.DataFrame({"업종": df[c_sec].astype(str).str.strip()})
+    if c_code is None and c_name is None:
+        raise ValueError("종목코드도 종목명도 없습니다.")
 
+    out = pd.DataFrame({"업종": df[c_sec].astype(str).str.strip()})
+    # 코드·이름을 **둘 다** 남긴다. 분석표에 어느 쪽이 있든 이어붙일 수 있게.
     if c_code is not None:
         out["종목코드"] = (df[c_code].astype(str).str.strip()
                        .str.replace(r"\D", "", regex=True).str.zfill(6))
-        key = "종목코드"
-    elif c_name is not None:
+    if c_name is not None:
         out["종목명"] = df[c_name].astype(str).str.strip()
-        key = "종목명"
-    else:
-        raise ValueError("종목코드도 종목명도 없습니다.")
 
+    key = "종목코드" if c_code is not None else "종목명"
     out = out[(out["업종"] != "") & (out["업종"].str.lower() != "nan")]
     return out.drop_duplicates(subset=[key]).reset_index(drop=True), key
 
 
-def attach_sector(stocks, smap, key):
-    """ROE·PBR 표에 업종을 붙인다. 못 찾은 종목은 '미분류'."""
-    if key not in stocks.columns:
-        # 종목코드 기준 매핑인데 분석표에 코드가 없으면 이름으로 시도
-        return stocks.assign(업종="미분류"), 0
-    out = stocks.merge(smap, on=key, how="left")
+def attach_sector(stocks, smap, key=None):
+    """ROE·PBR 표에 업종을 붙인다. 못 찾은 종목은 '미분류'.
+
+    key 를 지정하지 않으면 양쪽에 공통으로 있는 컬럼을 골라 쓴다
+    (종목코드 우선, 없으면 종목명). 저장 시점이 달라 컬럼 구성이
+    어긋나도 최대한 이어붙이기 위함.
+    """
+    cands = [key] if key else ["종목코드", "종목명"]
+    use = next((k for k in cands
+                if k and k in stocks.columns and k in smap.columns), None)
+    if use is None:  # 공통 키가 없으면 종목명으로 한 번 더 시도
+        use = ("종목명" if "종목명" in stocks.columns and "종목명" in smap.columns
+               else None)
+    if use is None:
+        return stocks.assign(업종="미분류"), 0, None
+
+    left = stocks.copy()
+    right = smap[[use, "업종"]].copy()
+    if use == "종목코드":
+        left[use] = left[use].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6)
+        right[use] = right[use].astype(str).str.replace(r"\D", "", regex=True).str.zfill(6)
+    else:
+        left[use] = left[use].astype(str).str.strip()
+        right[use] = right[use].astype(str).str.strip()
+
+    right = right.drop_duplicates(subset=[use])
+    out = left.merge(right, on=use, how="left")
     out["업종"] = out["업종"].fillna("미분류")
-    matched = int((out["업종"] != "미분류").sum())
-    return out, matched
+    return out, int((out["업종"] != "미분류").sum()), use
 
 
 def fiscal_year_for(date, month_cutoff=4):

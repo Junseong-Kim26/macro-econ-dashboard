@@ -498,21 +498,25 @@ with tab_roepbr:
 
             smap_saved = journal.load_table(f"sector_map_{mkt}")
             if smap_saved is not None and not smap_saved.empty:
-                skey = "종목코드" if "종목코드" in smap_saved.columns else "종목명"
-                if skey == "종목코드":
-                    smap_saved[skey] = (smap_saved[skey].astype(str)
-                                        .str.replace(r"\D", "", regex=True).str.zfill(6))
-                    if "종목코드" in sdf.columns:
-                        sdf["종목코드"] = sdf["종목코드"].astype(str).str.zfill(6)
-                sdf, matched = equity.attach_sector(sdf, smap_saved[[skey, "업종"]], skey)
+                sdf, matched, used_key = equity.attach_sector(sdf, smap_saved)
                 secs = sorted(s for s in sdf["업종"].unique() if s != "미분류")
                 if secs:
                     pick_sec = st.multiselect(
-                        f"업종으로 걸러 보기 (전체 {len(secs)}종, 매칭 {matched:,}종목)",
+                        f"업종으로 걸러 보기 (전체 {len(secs)}종 · "
+                        f"{used_key} 기준 매칭 {matched:,}/{len(sdf):,}종목)",
                         secs, key=f"sec_filter_{mkt}")
                     if pick_sec:
                         sdf = sdf[sdf["업종"].isin(pick_sec)]
                         st.caption(f"선택한 업종 {len(pick_sec)}개 · {len(sdf):,}종목만 분석합니다.")
+                else:
+                    # 전부 미분류면 왜 그런지 알려준다 (조용히 넘어가지 않게)
+                    st.warning(
+                        "업종이 하나도 붙지 않았습니다. "
+                        f"분석표 컬럼={list(sdf.columns)[:4]}, "
+                        f"업종맵 컬럼={list(smap_saved.columns)}\n\n"
+                        "→ **`🔄 API로 불러오기`** 를 한 번 눌러 자료를 새로 받거나, "
+                        "업종분류 엑셀을 다시 올려주세요. "
+                        "(예전에 저장된 자료에는 종목코드가 없어 이어붙일 수 없습니다)")
 
             # --- 이상치 필터 (자본잠식 기업이 회귀선을 왜곡하는 것을 방지) ---
             with st.expander("⚙️ 분석 범위 설정", expanded=False):
@@ -1180,11 +1184,32 @@ with tab_sector:
         if sec_df is None or sec_df.empty:
             st.warning("아직 자료가 없습니다. 위 버튼을 눌러 불러오세요.")
         else:
-            metric = st.radio("볼 지표", ["거래대금", "시가총액"],
+            m1, m2 = st.columns([1, 1])
+            metric = m1.radio("볼 지표", ["거래대금", "시가총액"],
                               horizontal=True, key="sector_metric")
+            SHOW = {"최근 3개월": 3, "최근 6개월": 6, "최근 1년": 12,
+                    "최근 3년": 36, "전체": None}
+            show_label = m2.selectbox("표시 기간", list(SHOW.keys()), index=1,
+                                      key="sector_show",
+                                      help="수집한 자료 중 화면에 보여줄 구간만 고릅니다. "
+                                           "다시 수집할 필요는 없습니다.")
+
             piv = (sec_df.pivot_table(index="날짜", columns="업종",
                                       values=metric, aggfunc="sum")
                    .fillna(0.0).sort_index())
+
+            # 표시 기간으로 자르기 (수집 자료는 그대로 두고 보기만 좁힌다)
+            months = SHOW[show_label]
+            if months is not None and not piv.empty:
+                cut = piv.index.max() - pd.DateOffset(months=months)
+                trimmed = piv[piv.index >= cut]
+                if len(trimmed) >= 2:
+                    piv = trimmed
+                else:
+                    st.caption(f"{show_label} 안에 시점이 부족해 전체를 보여줍니다.")
+            st.caption(f"화면에 표시 중: {len(piv)}개 시점 "
+                       f"({piv.index.min():%Y-%m-%d} ~ {piv.index.max():%Y-%m-%d})")
+
             share = piv.div(piv.sum(axis=1), axis=0) * 100
 
             latest_d = piv.index[-1]
