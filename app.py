@@ -107,7 +107,7 @@ def get_dart(year, rcode, codes_fn, progress=None):
 def _q_table(df, keep_quadrant=False):
     """4분면 화면·다운로드에서 공통으로 쓰는 표 모양 정리."""
     cols = (["분면"] if keep_quadrant and "분면" in df.columns else []) + \
-           ["종목명", "ROE", "PBR"]
+           ["종목명", "업종", "ROE", "PBR"]
     out = df[[c for c in cols if c in df.columns]].copy()
     out["ROE"] = out["ROE"].round(2)
     out["PBR"] = out["PBR"].round(2)
@@ -228,9 +228,10 @@ for start in range(0, len(results), PER_ROW):
 # ---------------------------------------------------------------------------
 # 탭: 그래프 / 시장지수(콤보) / 테이블 / 점수 기준
 # ---------------------------------------------------------------------------
-tab_graph, tab_combo, tab_table, tab_rule, tab_roepbr, tab_journal = st.tabs(
+(tab_graph, tab_combo, tab_table, tab_rule, tab_roepbr,
+ tab_sector, tab_journal) = st.tabs(
     ["📈 그래프", "📈 시장·환율·금리차", "📋 일별 테이블", "📖 점수 기준",
-     "📉 ROE·PBR 분석", "📝 매매일지"]
+     "📉 ROE·PBR 분석", "🏭 업종별 자금흐름", "📝 매매일지"]
 )
 
 # 기간 필터
@@ -476,6 +477,43 @@ with tab_roepbr:
         if sdf is None or sdf.empty:
             st.warning("아직 자료가 없습니다. 위에서 API로 불러오거나 파일을 올려주세요.")
         else:
+            # --- 업종 분류 붙이기 (KRX 업종분류 현황 업로드) ---
+            with st.expander("🏭 업종 분류 붙이기 (선택)"):
+                st.caption(
+                    "KRX 정보데이터시스템 → [업종분류 현황] 엑셀을 올리면 "
+                    "종목마다 업종이 붙어 **업종별로 걸러 보거나 색으로 구분**할 수 있습니다. "
+                    "한 번 올리면 보관되어 다시 올릴 필요가 없습니다."
+                )
+                up_sec = st.file_uploader("업종분류 현황 (엑셀/CSV)",
+                                          type=["xlsx", "xls", "csv"],
+                                          key=f"up_sector_{mkt}")
+                if up_sec is not None:
+                    try:
+                        smap, skey = equity.parse_sector_map(equity.read_table(up_sec))
+                        journal.save_table(smap, f"sector_map_{mkt}")
+                        st.success(f"{len(smap):,}개 종목의 업종을 읽었습니다 "
+                                   f"({skey} 기준, 업종 {smap['업종'].nunique()}종).")
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"읽지 못했습니다: {e}")
+
+            smap_saved = journal.load_table(f"sector_map_{mkt}")
+            if smap_saved is not None and not smap_saved.empty:
+                skey = "종목코드" if "종목코드" in smap_saved.columns else "종목명"
+                if skey == "종목코드":
+                    smap_saved[skey] = (smap_saved[skey].astype(str)
+                                        .str.replace(r"\D", "", regex=True).str.zfill(6))
+                    if "종목코드" in sdf.columns:
+                        sdf["종목코드"] = sdf["종목코드"].astype(str).str.zfill(6)
+                sdf, matched = equity.attach_sector(sdf, smap_saved[[skey, "업종"]], skey)
+                secs = sorted(s for s in sdf["업종"].unique() if s != "미분류")
+                if secs:
+                    pick_sec = st.multiselect(
+                        f"업종으로 걸러 보기 (전체 {len(secs)}종, 매칭 {matched:,}종목)",
+                        secs, key=f"sec_filter_{mkt}")
+                    if pick_sec:
+                        sdf = sdf[sdf["업종"].isin(pick_sec)]
+                        st.caption(f"선택한 업종 {len(pick_sec)}개 · {len(sdf):,}종목만 분석합니다.")
+
             # --- 이상치 필터 (자본잠식 기업이 회귀선을 왜곡하는 것을 방지) ---
             with st.expander("⚙️ 분석 범위 설정", expanded=False):
                 fc1, fc2 = st.columns(2)
@@ -497,7 +535,8 @@ with tab_roepbr:
                                  30, max(30, min(500, len(filt))),
                                  min(200, len(filt)), step=10)
                 use = filt.nlargest(topn, "시가총액").reset_index(drop=True)
-                st.caption(f"시가총액 상위 {topn}개 종목으로 분석합니다 (코스피200 근사).")
+                hint = " (코스피200 근사)" if mkt == "코스피" and topn == 200 else ""
+                st.caption(f"{mkt} 중 시가총액 상위 {topn}개 종목으로 분석합니다{hint}.")
             else:
                 use = filt.reset_index(drop=True)
                 st.caption(f"{len(use)}개 종목 전체로 분석합니다.")
@@ -1066,6 +1105,153 @@ with tab_roepbr:
             "- 필요한 컬럼: 일자, 종가(지수), PBR\n\n"
             "컬럼 이름이 조금 달라도(`PBR(배)`, `한글 종목약명` 등) 자동으로 찾습니다. "
             "한 번 올리면 Dropbox에 보관되어 다음에 다시 올리지 않아도 됩니다."
+        )
+
+with tab_sector:
+    st.markdown("#### 🏭 업종별 자금흐름")
+    st.caption(
+        "KRX 업종지수의 **거래대금·시가총액**을 6개월 간격으로 모아 "
+        "어느 업종에 돈이 몰리는지 봅니다. "
+        "상위분류(제조·증권·보험)는 중복이라 빼고 세부 업종만 씁니다."
+    )
+
+    smkt = st.radio("시장", list(krx_api.MARKETS.keys()),
+                    horizontal=True, key="sector_market")
+    SEC_KEY = f"sector_flow_{smkt}"
+
+    c1, c2 = st.columns(2)
+    syb = c1.slider("몇 년치를 모을까요?", 1, 6, 3, key="sector_years")
+    sgap = c2.selectbox("간격", [6, 3, 12], index=0, key="sector_gap",
+                        format_func=lambda m: f"{m}개월")
+
+    if not krx_api.get_key():
+        st.error("KRX_API_KEY 가 없습니다.")
+    else:
+        if st.button("🔄 업종 자료 불러오기", type="primary", key="sector_fetch"):
+            try:
+                dates = krx_api.period_end_dates(syb, sgap)
+                rows = []
+                pb = st.progress(0.0, text="업종 자료 수집 중...")
+                for i, d in enumerate(dates):
+                    sec, used = krx_api.fetch_near(
+                        partial(krx_api.fetch_sectors, market=smkt), d)
+                    if used is not None and not sec.empty:
+                        sec = sec.copy()
+                        sec["날짜"] = pd.to_datetime(used)
+                        rows.append(sec)
+                    pb.progress((i + 1) / len(dates),
+                                text=f"업종 자료 수집 중... {i+1}/{len(dates)}")
+                pb.empty()
+                if not rows:
+                    st.error("수집된 시점이 없습니다.")
+                else:
+                    got = pd.concat(rows, ignore_index=True)
+                    journal.save_table(got, SEC_KEY)
+                    st.session_state[SEC_KEY] = got
+                    st.success(f"{got['날짜'].nunique()}개 시점 · "
+                               f"업종 {got['업종'].nunique()}개 수집 완료")
+            except PermissionError as e:
+                st.error(str(e))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"수집 중 오류: {e}")
+
+        sec_df = st.session_state.get(SEC_KEY)
+        if sec_df is None:
+            saved = journal.load_table(SEC_KEY)
+            if saved is not None and not saved.empty:
+                sec_df = saved.copy()
+                sec_df["날짜"] = pd.to_datetime(sec_df["날짜"], errors="coerce")
+                st.info("이전에 수집한 자료입니다. 위 버튼으로 갱신하세요.")
+
+        if sec_df is None or sec_df.empty:
+            st.warning("아직 자료가 없습니다. 위 버튼을 눌러 불러오세요.")
+        else:
+            metric = st.radio("볼 지표", ["거래대금", "시가총액"],
+                              horizontal=True, key="sector_metric")
+            piv = (sec_df.pivot_table(index="날짜", columns="업종",
+                                      values=metric, aggfunc="sum")
+                   .fillna(0.0).sort_index())
+            share = piv.div(piv.sum(axis=1), axis=0) * 100
+
+            latest_d = piv.index[-1]
+            topn = st.slider("상위 몇 개 업종을 볼까요?", 3,
+                             min(20, len(piv.columns)),
+                             min(8, len(piv.columns)), key="sector_topn")
+            order = piv.loc[latest_d].sort_values(ascending=False)
+            picks = list(order.head(topn).index)
+
+            unit = 1e12
+            st.markdown(f"##### 최근 시점({latest_d:%Y-%m-%d}) 업종 순위")
+            bar = go.Figure(go.Bar(
+                x=(order.head(topn) / unit)[::-1].values,
+                y=order.head(topn).index[::-1], orientation="h",
+                marker_color="#4575b4",
+                text=[f"{v/unit:,.2f}조" for v in order.head(topn).values][::-1],
+                textposition="auto"))
+            bar.update_layout(height=max(260, 34 * topn + 90),
+                              margin=dict(l=40, r=20, t=20, b=30),
+                              xaxis_title=f"{metric} (조원)")
+            st.plotly_chart(bar, use_container_width=True)
+
+            mode = st.radio("추이 보기", ["금액(조원)", "비중(%)"],
+                            horizontal=True, key="sector_mode")
+            figs = go.Figure()
+            for name in picks:
+                if mode.startswith("비중"):
+                    figs.add_trace(go.Scatter(
+                        x=share.index, y=share[name], mode="lines",
+                        name=name, stackgroup="one", line=dict(width=1)))
+                else:
+                    figs.add_trace(go.Scatter(
+                        x=piv.index, y=piv[name] / unit, mode="lines+markers",
+                        name=name, line=dict(width=2)))
+            figs.update_layout(
+                height=420, margin=dict(l=50, r=20, t=20, b=30),
+                hovermode="x unified",
+                yaxis_title="비중 (%)" if mode.startswith("비중") else f"{metric} (조원)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="left", x=0))
+            st.plotly_chart(figs, use_container_width=True)
+
+            # 처음 대비 비중 변화 = 자금이 어디로 옮겨갔나
+            if len(share) >= 2:
+                delta = (share.iloc[-1] - share.iloc[0]).sort_values(ascending=False)
+                st.markdown(
+                    f"##### 자금 이동 ({share.index[0]:%y년 %m월} → "
+                    f"{share.index[-1]:%y년 %m월}, 비중 변화)")
+                d1, d2 = st.columns(2)
+                d1.markdown("**비중이 늘어난 업종**")
+                d1.dataframe(delta.head(5).round(2).rename("변화(%p)").reset_index(),
+                             use_container_width=True, hide_index=True)
+                d2.markdown("**비중이 줄어든 업종**")
+                d2.dataframe(delta.tail(5).round(2).rename("변화(%p)").reset_index(),
+                             use_container_width=True, hide_index=True)
+
+            with st.expander("📋 전체 표 보기 / 내려받기"):
+                show = (piv / unit).round(3)
+                show.index = show.index.strftime("%Y-%m-%d")
+                st.dataframe(show, use_container_width=True)
+                xb = io.BytesIO()
+                with pd.ExcelWriter(xb, engine="openpyxl") as w:
+                    show.to_excel(w, sheet_name=f"{metric}(조원)")
+                    share.round(2).set_index(
+                        share.index.strftime("%Y-%m-%d")).to_excel(w, sheet_name="비중(%)")
+                st.download_button(
+                    "⬇️ 엑셀 (금액·비중)", xb.getvalue(),
+                    f"업종별_{metric}_{smkt}_{pd.Timestamp.today():%Y%m%d}.xlsx",
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet", key="sector_xlsx")
+
+    with st.expander("ℹ️ 종목별 업종 분류는 왜 없나요?"):
+        st.markdown(
+            "**KRX OpenAPI에는 '어느 종목이 어느 업종인지' 알려주는 서비스가 없습니다.**\n\n"
+            "- 위 업종별 집계는 KRX가 이미 계산해 발표하는 **업종지수**에서 가져온 것이라 "
+            "종목을 일일이 분류할 필요가 없고, KRX 공식 수치라 더 정확합니다.\n"
+            "- 종목별 분류가 필요하면 `유가증권/코스닥 종목기본정보` 서비스를 "
+            "**이용신청**해야 합니다(openapi.krx.co.kr, 승인 ~1일). "
+            "다만 그 서비스에 업종 항목이 있는지는 승인 후에야 확인됩니다.\n"
+            "- 안 되면 data.krx.co.kr 의 **[업종분류 현황]** 엑셀을 받아 올리는 방식으로 "
+            "붙일 수 있습니다."
         )
 
 with tab_journal:

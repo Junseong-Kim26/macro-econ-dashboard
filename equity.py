@@ -21,6 +21,7 @@ import pandas as pd
 ALIASES = {
     "종목명": ["종목명", "한글 종목약명", "한글종목약명", "한글 종목명", "종목", "name"],
     "종목코드": ["종목코드", "단축코드", "표준코드", "code"],
+    "업종": ["업종명", "업종", "산업분류", "업종구분", "sector", "industry"],
     "PBR": ["pbr", "주가순자산비율"],
     "PER": ["per", "주가수익비율"],
     "EPS": ["eps", "주당순이익"],
@@ -182,6 +183,7 @@ def build_from_api(krx_df, dart_df, corp_map, annualize=None):
     merged = merged[merged["자본총계"] > 0]
 
     out = pd.DataFrame({
+        "종목코드": merged["종목코드"],   # 업종 매핑 등에 쓰려고 남긴다
         "종목명": merged["종목명"],
         "PBR": merged["시가총액"] / merged["자본총계"],
         "ROE": merged["당기순이익"] / merged["자본총계"] * 100.0,
@@ -277,6 +279,46 @@ def quadrants(df, roe_cut=None, pbr_cut=None):
         default="",
     )
     return d, roe_cut, pbr_cut
+
+
+def parse_sector_map(df):
+    """KRX '업종분류 현황' 표에서 종목↔업종 매핑을 뽑는다.
+
+    종목코드가 있으면 코드로, 없으면 종목명으로 잇는다.
+    반환: (매핑 DataFrame[키·업종], 키컬럼명('종목코드' 또는 '종목명'))
+    """
+    c_sec = find_col(df, "업종")
+    if c_sec is None:
+        raise ValueError(
+            "업종 컬럼을 찾지 못했습니다. KRX [업종분류 현황] 자료인지 확인해주세요. "
+            "(필요 컬럼: 종목코드 또는 종목명, 업종명)")
+
+    c_code, c_name = find_col(df, "종목코드"), find_col(df, "종목명")
+    out = pd.DataFrame({"업종": df[c_sec].astype(str).str.strip()})
+
+    if c_code is not None:
+        out["종목코드"] = (df[c_code].astype(str).str.strip()
+                       .str.replace(r"\D", "", regex=True).str.zfill(6))
+        key = "종목코드"
+    elif c_name is not None:
+        out["종목명"] = df[c_name].astype(str).str.strip()
+        key = "종목명"
+    else:
+        raise ValueError("종목코드도 종목명도 없습니다.")
+
+    out = out[(out["업종"] != "") & (out["업종"].str.lower() != "nan")]
+    return out.drop_duplicates(subset=[key]).reset_index(drop=True), key
+
+
+def attach_sector(stocks, smap, key):
+    """ROE·PBR 표에 업종을 붙인다. 못 찾은 종목은 '미분류'."""
+    if key not in stocks.columns:
+        # 종목코드 기준 매핑인데 분석표에 코드가 없으면 이름으로 시도
+        return stocks.assign(업종="미분류"), 0
+    out = stocks.merge(smap, on=key, how="left")
+    out["업종"] = out["업종"].fillna("미분류")
+    matched = int((out["업종"] != "미분류").sum())
+    return out, matched
 
 
 def fiscal_year_for(date, month_cutoff=4):
