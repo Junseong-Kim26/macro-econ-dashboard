@@ -64,9 +64,22 @@ def fmt(value, decimals, unit):
 
 
 def save_dart_cache(cmap, fin, year, rcode):
-    """DART 재무·기업코드를 Dropbox에 보관 (분기마다 한 번만 갱신하면 됨)."""
+    """DART 재무·기업코드를 Dropbox에 보관 (분기마다 한 번만 갱신하면 됨).
+
+    ★ 기존 보관본과 **합쳐서** 저장한다. 코스피만 받아두고 코스닥을 조회하면
+      보관본에 코스닥 종목이 없어 결합이 비는 문제를 막기 위함.
+    """
     mdf = pd.DataFrame({"종목코드": list(cmap.keys()), "corp_code": list(cmap.values())})
     journal.save_table(mdf, "dart_corpmap")
+
+    fin = fin.copy()
+    fin["corp_code"] = fin["corp_code"].astype(str).str.zfill(8)
+    prev = journal.load_table(f"dart_fin_{year}_{rcode}")
+    if prev is not None and not prev.empty and "corp_code" in prev.columns:
+        prev = prev.copy()
+        prev["corp_code"] = prev["corp_code"].astype(str).str.zfill(8)
+        fin = (pd.concat([prev, fin], ignore_index=True)
+               .drop_duplicates(subset=["corp_code"], keep="last"))
     journal.save_table(fin, f"dart_fin_{year}_{rcode}")
 
 
@@ -99,8 +112,24 @@ def get_dart(year, rcode, codes_fn, progress=None):
         cmap, fin = load_dart_cache(year, rcode)
         if cmap is None:
             raise
+
+        # 보관본이 이 시장 종목을 담고 있는지 확인 (다른 시장 것만 있으면 결합이 빈다)
+        want = set(codes_fn(cmap))
+        have = set(fin["corp_code"]) if not fin.empty else set()
+        covered = len(want & have)
+        if want and covered / len(want) < 0.3:
+            raise dart_api.DartUnreachable(
+                f"보관된 재무에 이 시장 종목이 거의 없습니다 "
+                f"({covered}/{len(want)}건).\n\n"
+                "**Streamlit Cloud에서는 DART에 접속할 수 없습니다.** "
+                "이 시장은 아직 로컬에서 한 번도 수집하지 않아 보관본이 없습니다.\n\n"
+                "➡️ **내 PC에서** `거시경제대시보드_실행하기.bat` 를 실행하고, "
+                "이 시장을 골라 `API로 불러오기` 를 **한 번만** 눌러주세요. "
+                "그 뒤로는 클라우드에서도 됩니다.")
+
         return cmap, fin, (
-            f"DART에 직접 접속할 수 없어 **보관된 재무({year}년)** 를 사용했습니다. "
+            f"DART에 직접 접속할 수 없어 **보관된 재무({year}년)** 를 사용했습니다"
+            f"(이 시장 {covered}/{len(want)}종목). "
             "주가·시가총액은 방금 KRX에서 받은 최신 값입니다.")
 
 
