@@ -122,14 +122,55 @@ def h60_state(h60_df, eps=FLAT_EPS, slope_bars=3):
     return out
 
 
+# ---------------------------------------------------------------------------
+# 볼린저밴드 하단 조건 (매수 대상 선별)
+# ---------------------------------------------------------------------------
+BB_PERIOD, BB_K, BB_LOWER_MAX = 12, 2.0, 0.20
+
+
+def bollinger_state(df, period=BB_PERIOD, k=BB_K):
+    """볼린저밴드 안에서 지금 어디쯤인지.
+
+    %B = (종가 - 하단) / (상단 - 하단)
+      · 0 이하 : 하단선 아래로 이탈
+      · 0~0.2  : 하단 근처 (과매도 구간)
+      · 1 이상 : 상단선 위로 이탈
+    """
+    b = ohlc.bollinger(df, period, k)
+    last = b.iloc[-1]
+    pos = last.get("BB위치")
+    out = {
+        "BB중심": float(last["BB중심"]) if pd.notna(last["BB중심"]) else None,
+        "BB상단": float(last["BB상단"]) if pd.notna(last["BB상단"]) else None,
+        "BB하단": float(last["BB하단"]) if pd.notna(last["BB하단"]) else None,
+        "BB위치": float(pos) if pd.notna(pos) else None,
+    }
+    out["밴드폭%"] = (
+        (out["BB상단"] - out["BB하단"]) / out["BB중심"] * 100
+        if out["BB중심"] else None)
+    out["하단이탈"] = (out["BB위치"] is not None and out["BB위치"] <= 0)
+    return out
+
+
+def near_lower_band(df, period=BB_PERIOD, k=BB_K, max_pos=BB_LOWER_MAX):
+    """밴드 하단 구간에 있는가. 반환: (해당여부, 상태dict)"""
+    st = bollinger_state(df, period, k)
+    ok = st["BB위치"] is not None and st["BB위치"] <= max_pos
+    return ok, st
+
+
 def evaluate(daily_df, h60_df, eps=FLAT_EPS,
-             down_min=DOWN_MIN, down_max=DOWN_MAX):
-    """조건_1·조건_2 를 판정한다. 반환: dict(상세 + 점수)"""
+             down_min=DOWN_MIN, down_max=DOWN_MAX,
+             bb_period=BB_PERIOD, bb_k=BB_K, bb_max_pos=BB_LOWER_MAX):
+    """조건_1·조건_2 와 볼린저 하단 조건을 판정한다. 반환: dict(상세 + 점수)"""
     wk, _ = weekly_state(daily_df, eps)
     h6 = h60_state(h60_df, eps)
     down_n = consecutive_down(daily_df)
+    bb_ok, bb = near_lower_band(daily_df, bb_period, bb_k, bb_max_pos)
 
     r = {"연속음봉": down_n}
+    r.update(bb)
+    r["볼린저하단"] = bb_ok
     r.update({f"주봉_{k}": v for k, v in wk.items()})
     r.update({f"60분_{k}": v for k, v in h6.items()})
 
@@ -169,6 +210,8 @@ def evaluate(daily_df, h60_df, eps=FLAT_EPS,
         score += 5
     if c2a:
         score += 5
+    if bb_ok:
+        score += 10          # 밴드 하단 = 매수 대상 구간
     r["신호점수"] = score
 
     labels = []
@@ -180,5 +223,7 @@ def evaluate(daily_df, h60_df, eps=FLAT_EPS,
         labels.append("조건2 스윙진입")
     if r["조건2_60분대기"]:
         labels.append("조건2 대기")
+    if bb_ok:
+        labels.append("볼린저 하단")
     r["신호"] = " · ".join(labels) if labels else "해당없음"
     return r

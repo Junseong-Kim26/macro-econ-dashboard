@@ -1346,6 +1346,17 @@ with tab_screen:
         base["종목코드"] = (base["종목코드"].astype(str)
                         .str.replace(r"\D", "", regex=True).str.zfill(6))
 
+        # 대상 종목군: 코스피는 코스피200, 코스닥은 코스닥150
+        #  ※ KRX OpenAPI에 지수 구성종목 서비스가 없어 시가총액 상위로 근사한다.
+        UNIVERSE = {"코스피": ("코스피200", 200), "코스닥150": ("코스닥150", 150)}
+        uni_name, uni_n = UNIVERSE.get(smk, (smk, None))
+        if uni_n and "시가총액" in base.columns and len(base) > uni_n:
+            base = base.nlargest(uni_n, "시가총액").reset_index(drop=True)
+            st.caption(f"대상: **{uni_name}** (시가총액 상위 {uni_n}종목으로 근사) "
+                       f"— 구성종목 명단은 KRX API가 제공하지 않습니다.")
+        else:
+            st.caption(f"대상: **{uni_name}** {len(base)}종목")
+
         st.markdown("##### 1단계 · 재무 조건")
         f1, f2, f3 = st.columns(3)
         pbr_max = f1.number_input("PBR 이하", 0.1, 50.0, 5.0, 0.5, key="sc_pbr")
@@ -1357,8 +1368,9 @@ with tab_screen:
         if "시가총액" in cand.columns:
             cand = cand.sort_values("시가총액", ascending=False)
         cand = cand.head(int(top_n))
-        st.caption(f"재무 조건 통과 **{len(base[(base['PBR'] <= pbr_max) & (base['ROE'] >= roe_min)]):,}종목** "
-                   f"중 시가총액 상위 **{len(cand)}종목**을 검사합니다 "
+        passed = len(base[(base["PBR"] <= pbr_max) & (base["ROE"] >= roe_min)])
+        st.caption(f"{uni_name} {len(base):,}종목 중 재무 조건 통과 **{passed:,}종목** → "
+                   f"시가총액 상위 **{len(cand)}종목** 검사 "
                    f"(예상 {max(1, round(len(cand) * 1.6))}초).")
 
         with st.expander("⚙️ 2단계 · 차트 조건 세부설정"):
@@ -1367,13 +1379,26 @@ with tab_screen:
                             help="이 값 안쪽이면 '평평', 넘으면 '상승/하락'으로 봅니다. "
                                  "작게 잡을수록 엄격해집니다.")
             dmin, dmax = st.slider("일봉 연속 음봉 개수", 1, 8, (3, 4), key="sc_down")
-            st.markdown(
-                "**조건_1 (최소 매수 타점)** — 주봉 일목 전환선 우상향 + "
-                "일봉 연속 음봉 + 60분 5이평이 *하락→평평*\n\n"
-                "· 추가매수: 60분 5이평이 *상승각도*로 전환\n\n"
-                "**조건_2 (스윙)** — 주봉 종가가 5주이평 위 + 주봉 전환선 상승·기준선 위 "
-                "+ 60분 종가가 5이평 아래(대기) → 위로 올라서면 진입"
-            )
+            b1, b2, b3 = st.columns(3)
+            sc_bbp = b1.number_input("볼린저 기간(일봉)", 5, 60,
+                                     int(signals.BB_PERIOD), 1, key="sc_bbp")
+            sc_bbk = b2.number_input("볼린저 배수", 1.0, 4.0,
+                                     float(signals.BB_K), 0.1, key="sc_bbk")
+            sc_bbpos = b3.slider("밴드 하단 기준 (%B 이하)", 0.0, 0.5,
+                                 float(signals.BB_LOWER_MAX), 0.05, key="sc_bbpos",
+                                 help="%B는 밴드 안 위치입니다. 0=하단선, 1=상단선. "
+                                      "0.2면 '하단에서 20% 이내'를 하단 구간으로 봅니다.")
+            only_bb = st.checkbox("볼린저 하단 종목만 대상으로", True, key="sc_onlybb",
+                                  help="끄면 하단이 아니어도 검사하고, 점수에만 반영합니다.")
+            st.markdown("""
+**조건_1 (최소 매수 타점)** — 주봉 일목 전환선 우상향 + 일봉 연속 음봉 +
+60분 5이평이 *하락→평평*으로 전환. 추가매수는 60분 5이평이 *상승각도*로 전환할 때.
+
+**조건_2 (스윙)** — 주봉 종가가 5주이평 위 + 주봉 전환선 상승·기준선 위 +
+60분 종가가 5이평 아래(대기) → 위로 올라서면 진입.
+
+**볼린저 하단** — 일봉 볼린저밴드 하단 구간(%B 기준 이하)에 있는 종목만 대상으로 삼습니다.
+""")
 
         if st.button("🔎 스크리닝 실행", type="primary", key="sc_run"):
             res, fails = [], []
@@ -1384,7 +1409,9 @@ with tab_screen:
                     dly, _, _ = ohlc.fetch_ohlc(code, smk, 400)
                     h60 = ohlc.fetch_intraday(code, smk)
                     r = signals.evaluate(dly, h60, eps=eps,
-                                         down_min=dmin, down_max=dmax)
+                                         down_min=dmin, down_max=dmax,
+                                         bb_period=int(sc_bbp), bb_k=float(sc_bbk),
+                                         bb_max_pos=float(sc_bbpos))
                     r.update({"종목명": name, "종목코드": code,
                               "ROE": row["ROE"], "PBR": row["PBR"]})
                     if "업종" in row.index:
@@ -1400,6 +1427,14 @@ with tab_screen:
                 st.error("검사에 성공한 종목이 없습니다.")
             else:
                 out = pd.DataFrame(res)
+                if only_bb:
+                    before = len(out)
+                    out = out[out["볼린저하단"]].reset_index(drop=True)
+                    st.caption(f"볼린저({int(sc_bbp)},{sc_bbk:g}) 하단 조건(%B ≤ "
+                               f"{sc_bbpos:g})으로 {before}종목 중 {len(out)}종목이 남았습니다.")
+                if out.empty:
+                    st.warning("볼린저 하단 구간에 있는 종목이 없습니다. "
+                               "기준(%B)을 올리거나 '하단 종목만' 체크를 꺼보세요.")
                 # 신호점수 → ROE/PBR 매력도 순으로 정렬
                 out["재무매력도"] = out["ROE"] / out["PBR"].replace(0, pd.NA)
                 out = out.sort_values(["신호점수", "재무매력도"],
@@ -1434,17 +1469,20 @@ with tab_screen:
                 view = out.head(15)
                 st.caption("참고로 점수 상위 15종목을 보여드립니다.")
 
-            cols = ["순위", "종목명", "신호", "신호점수", "ROE", "PBR"]
+            cols = ["순위", "종목명", "신호", "신호점수", "ROE", "PBR", "BB위치"]
             if "업종" in view.columns:
                 cols.insert(2, "업종")
             show = view[cols].copy()
             show["ROE"] = show["ROE"].round(1)
             show["PBR"] = show["PBR"].round(2)
+            if "BB위치" in show.columns:
+                show["BB위치"] = show["BB위치"].astype(float).round(2)
+                show = show.rename(columns={"BB위치": "볼린저%B"})
             st.dataframe(show, use_container_width=True, hide_index=True,
                          height=min(560, 40 * len(show) + 60))
 
             st.markdown("##### 조건 충족 내역")
-            detail_cols = ["종목명", "조건1_주봉전환선우상향", "조건1_일봉연속음봉",
+            detail_cols = ["종목명", "볼린저하단", "BB위치", "조건1_주봉전환선우상향", "조건1_일봉연속음봉",
                            "조건1_60분평평전환", "조건1_추가매수",
                            "조건2_주봉5이평위", "조건2_전환선상승·기준선위",
                            "조건2_충족", "연속음봉"]
@@ -1514,7 +1552,12 @@ with tab_candle:
     show_ich = g3.checkbox("일목균형표", False, key="ck_ich")
     show_macd = g4.checkbox("MACD", True, key="ck_macd")
     show_rsi = g5.checkbox("RSI", True, key="ck_rsi")
-    vol_mult = st.slider("거래량 급증 기준 (평균 대비 배수)", 1.5, 5.0, 2.0, 0.5,
+    s1, s2, s3 = st.columns(3)
+    bb_period = s1.number_input("볼린저 기간(봉)", 5, 120, 12, 1, key="ck_bbp",
+                                help="이동평균을 몇 봉으로 낼지. 짧을수록 민감합니다.")
+    bb_k = s2.number_input("볼린저 배수(표준편차)", 1.0, 4.0, 2.0, 0.1, key="ck_bbk",
+                           help="평균에서 표준편차 몇 배만큼 밴드를 벌릴지.")
+    vol_mult = s3.slider("거래량 급증 기준(평균 대비)", 1.5, 5.0, 2.0, 0.5,
                          key="ck_volmult")
 
     if not picked_code:
@@ -1534,8 +1577,8 @@ with tab_candle:
             bars = ohlc.resample_ohlc(raw, ohlc.FREQS[freq_label])
             # 지표마다 필요한 봉 수가 달라, 부족하면 미리 알려준다
             need = []
-            if show_bb and len(bars) < 20:
-                need.append("볼린저밴드 20봉")
+            if show_bb and len(bars) < bb_period:
+                need.append(f"볼린저밴드 {int(bb_period)}봉")
             if show_ma and len(bars) < 60:
                 need.append("60봉 이동평균 60봉")
             if show_ich and len(bars) < 52:
@@ -1547,7 +1590,8 @@ with tab_candle:
                 st.info(f"현재 {freq_label} {len(bars)}봉입니다. "
                         f"{' · '.join(need)}이 필요해 일부 지표는 비어 보일 수 있습니다. "
                         "**기간**을 늘리면 채워집니다.")
-            d, cloud = ohlc.add_all(bars, vol_mult=vol_mult)
+            d, cloud = ohlc.add_all(bars, bb_period=int(bb_period),
+                                    bb_k=float(bb_k), vol_mult=vol_mult)
             s = ohlc.summarize(d)
 
             k1, k2, k3, k4 = st.columns(4)
@@ -1594,10 +1638,10 @@ with tab_candle:
             # ---- 볼린저밴드 ----
             if show_bb:
                 figc.add_trace(go.Scatter(
-                    x=d["날짜"], y=d["BB상단"], mode="lines", name="볼린저 상단",
+                    x=d["날짜"], y=d["BB상단"], mode="lines", name=f"볼린저 상단({int(bb_period)},{bb_k:g})",
                     line=dict(width=1, color="#90a4ae")), row=1, col=1)
                 figc.add_trace(go.Scatter(
-                    x=d["날짜"], y=d["BB하단"], mode="lines", name="볼린저 하단",
+                    x=d["날짜"], y=d["BB하단"], mode="lines", name=f"볼린저 하단({int(bb_period)},{bb_k:g})",
                     line=dict(width=1, color="#90a4ae"),
                     fill="tonexty", fillcolor="rgba(144,164,174,0.13)"),
                     row=1, col=1)
@@ -1688,7 +1732,7 @@ with tab_candle:
                                   + ("위 (상승 추세)" if gap >= 0 else "아래 (하락 추세)")})
             if show_bb and pd.notna(last.get("BB위치")):
                 pos = float(last["BB위치"])
-                msgs.append({"지표": "볼린저밴드", "값": f"밴드 내 {pos*100:.0f}% 지점",
+                msgs.append({"지표": f"볼린저({int(bb_period)},{bb_k:g})", "값": f"밴드 내 {pos*100:.0f}% 지점",
                              "해석": ("상단 근처 — 단기 과열 주의" if pos > 0.8 else
                                     "하단 근처 — 과매도 구간" if pos < 0.2 else
                                     "중간 — 방향성 뚜렷하지 않음")})
