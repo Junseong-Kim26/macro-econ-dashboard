@@ -850,7 +850,7 @@ with tab_roepbr:
                     "각 시점에는 그때 이미 공시돼 있던 재무만 사용합니다."
                 )
 
-                # 어떤 지수를 y축에 놓을지 선택 (코스닥150은 종합지수와 값이 다름)
+                # 어떤 지수를 y축에 놓을지 선택 (코스닥은 종합/150 지수 값이 다름)
                 idx_opts = krx_api.MARKETS[mkt].get(
                     "index_options", [krx_api.MARKETS[mkt]["index_name"]])
                 if len(idx_opts) > 1:
@@ -1346,9 +1346,9 @@ with tab_screen:
         base["종목코드"] = (base["종목코드"].astype(str)
                         .str.replace(r"\D", "", regex=True).str.zfill(6))
 
-        # 대상 종목군: 코스피는 코스피200, 코스닥은 코스닥150
+        # 대상 종목군: 두 시장 모두 시가총액 상위 200종목
         #  ※ KRX OpenAPI에 지수 구성종목 서비스가 없어 시가총액 상위로 근사한다.
-        UNIVERSE = {"코스피": ("코스피200", 200), "코스닥150": ("코스닥150", 150)}
+        UNIVERSE = {"코스피": ("코스피200", 200), "코스닥": ("코스닥 시총 200", 200)}
         uni_name, uni_n = UNIVERSE.get(smk, (smk, None))
         if uni_n and "시가총액" in base.columns and len(base) > uni_n:
             base = base.nlargest(uni_n, "시가총액").reset_index(drop=True)
