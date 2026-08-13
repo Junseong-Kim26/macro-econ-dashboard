@@ -22,6 +22,7 @@ import data as data_mod
 import equity
 import journal
 import krx_api
+import ohlc
 import scoring
 
 load_dotenv()
@@ -258,9 +259,9 @@ for start in range(0, len(results), PER_ROW):
 # 탭: 그래프 / 시장지수(콤보) / 테이블 / 점수 기준
 # ---------------------------------------------------------------------------
 (tab_graph, tab_combo, tab_table, tab_rule, tab_roepbr,
- tab_sector, tab_journal) = st.tabs(
+ tab_sector, tab_candle, tab_journal) = st.tabs(
     ["📈 그래프", "📈 시장·환율·금리차", "📋 일별 테이블", "📖 점수 기준",
-     "📉 ROE·PBR 분석", "🏭 업종별 자금흐름", "📝 매매일지"]
+     "📉 ROE·PBR 분석", "🏭 업종별 자금흐름", "🕯️ 종목 캔들차트", "📝 매매일지"]
 )
 
 # 기간 필터
@@ -1321,6 +1322,141 @@ with tab_sector:
             "- 안 되면 data.krx.co.kr 의 **[업종분류 현황]** 엑셀을 받아 올리는 방식으로 "
             "붙일 수 있습니다."
         )
+
+with tab_candle:
+    st.markdown("#### 🕯️ 종목 캔들차트")
+    st.caption(
+        "4분면·회귀분석에서 눈에 띈 종목의 **일별 주가 흐름**을 봅니다. "
+        "시가·고가·저가·종가(캔들)와 거래량, 이동평균선을 함께 표시합니다."
+    )
+
+    cmkt = st.radio("시장", list(krx_api.MARKETS.keys()),
+                    horizontal=True, key="candle_market")
+
+    # 저장된 ROE·PBR 목록에서 종목을 고르게 하고, 없으면 코드 직접 입력
+    stock_tbl = journal.load_table(f"roe_pbr_stocks_{cmkt}")
+    picked_code, picked_name = None, None
+
+    if stock_tbl is not None and not stock_tbl.empty and "종목코드" in stock_tbl.columns:
+        stock_tbl = stock_tbl.copy()
+        stock_tbl["종목코드"] = (stock_tbl["종목코드"].astype(str)
+                             .str.replace(r"\D", "", regex=True).str.zfill(6))
+        opts = (stock_tbl.sort_values("시가총액", ascending=False)
+                if "시가총액" in stock_tbl.columns else stock_tbl)
+        labels = [f"{r['종목명']} ({r['종목코드']})" for _, r in opts.iterrows()]
+        sel = st.selectbox("종목 선택", labels, key=f"candle_sel_{cmkt}")
+        if sel:
+            picked_name = sel.rsplit(" (", 1)[0]
+            picked_code = sel.rsplit("(", 1)[1].rstrip(")")
+    else:
+        st.info("ROE·PBR 자료가 없어 목록을 못 만듭니다. 종목코드를 직접 입력하세요.")
+
+    manual = st.text_input("또는 종목코드 직접 입력 (6자리)", "",
+                           key=f"candle_manual_{cmkt}",
+                           placeholder="예: 388210")
+    if manual.strip():
+        picked_code = manual.strip().zfill(6)
+        picked_name = picked_name or picked_code
+
+    cperiod = st.selectbox("기간", list(ohlc.PERIODS.keys()), index=1,
+                           key="candle_period")
+
+    if not picked_code:
+        st.warning("종목을 고르거나 종목코드를 입력해주세요.")
+    else:
+        try:
+            with st.spinner(f"{picked_name} 시세를 받는 중..."):
+                bar = st.progress(0.0)
+                df, src, note = ohlc.fetch_ohlc(
+                    picked_code, cmkt, ohlc.PERIODS[cperiod],
+                    progress=lambda d, t: bar.progress(
+                        d / t, text=f"KRX에서 하루씩 받는 중... {d}/{t}"))
+                bar.empty()
+            if note:
+                st.warning(note)
+
+            d = ohlc.add_indicators(df)
+            s = ohlc.summarize(d)
+
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric(f"{picked_name} 종가",
+                      f"{s['종가']:,.0f}원",
+                      f"{s['전일대비']:+,.0f} ({s['전일대비율']:+.2f}%)")
+            k2.metric(f"{cperiod} 수익률", f"{s['기간수익률']:+.1f}%")
+            k3.metric("기간 최고", f"{s['기간최고']:,.0f}원",
+                      f"{s['최고일']:%y-%m-%d}", delta_color="off")
+            k4.metric("기간 최저", f"{s['기간최저']:,.0f}원",
+                      f"{s['최저일']:%y-%m-%d}", delta_color="off")
+
+            # 캔들 + 거래량 (위아래 2단, x축 공유)
+            figc = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                 row_heights=[0.72, 0.28], vertical_spacing=0.04)
+            figc.add_trace(go.Candlestick(
+                x=d["날짜"], open=d["시가"], high=d["고가"],
+                low=d["저가"], close=d["종가"], name="주가",
+                increasing_line_color="#d62728", decreasing_line_color="#1f77b4",
+                increasing_fillcolor="#d62728", decreasing_fillcolor="#1f77b4"),
+                row=1, col=1)
+
+            for m, col in [(5, "#ff7f0e"), (20, "#2ca02c"), (60, "#9467bd")]:
+                if f"MA{m}" in d.columns:
+                    figc.add_trace(go.Scatter(
+                        x=d["날짜"], y=d[f"MA{m}"], mode="lines",
+                        name=f"{m}일 평균", line=dict(width=1.4, color=col)),
+                        row=1, col=1)
+
+            vol_color = ["#d62728" if c >= o else "#1f77b4"
+                         for o, c in zip(d["시가"], d["종가"])]
+            figc.add_trace(go.Bar(x=d["날짜"], y=d["거래량"], name="거래량",
+                                  marker_color=vol_color, showlegend=False),
+                           row=2, col=1)
+
+            figc.update_layout(
+                height=620, margin=dict(l=50, r=20, t=30, b=20),
+                xaxis_rangeslider_visible=False, hovermode="x unified",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                            xanchor="left", x=0))
+            figc.update_yaxes(title_text="주가 (원)", row=1, col=1)
+            figc.update_yaxes(title_text="거래량", row=2, col=1)
+            # 휴장일 빈칸 제거
+            figc.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+            st.plotly_chart(figc, use_container_width=True)
+
+            # 이동평균 대비 현재 위치 = 추세 판단의 기본
+            st.markdown("##### 이동평균선 대비 위치")
+            rows = []
+            for m in (5, 20, 60):
+                c = f"MA{m}"
+                if c in d.columns and pd.notna(d[c].iloc[-1]):
+                    ma = float(d[c].iloc[-1])
+                    gap = (s["종가"] / ma - 1) * 100
+                    rows.append({"이동평균": f"{m}일", "평균가": f"{ma:,.0f}원",
+                                 "현재가 대비": f"{gap:+.1f}%",
+                                 "위치": "위 (강세)" if gap >= 0 else "아래 (약세)"})
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True,
+                             hide_index=True)
+                st.caption(
+                    "현재가가 이동평균선 **위**에 있으면 그 기간 평균보다 비싸게 "
+                    "거래되는 것(상승 추세), **아래**면 그 반대입니다. "
+                    "5일은 단기, 20일은 한 달, 60일은 분기 흐름을 봅니다."
+                )
+
+            with st.expander("📋 일별 시세 표 / 내려받기"):
+                show = d.copy()
+                show["날짜"] = show["날짜"].dt.strftime("%Y-%m-%d")
+                num = [c for c in show.columns if c != "날짜"]
+                st.dataframe(show.sort_values("날짜", ascending=False).round(1),
+                             use_container_width=True, hide_index=True, height=320)
+                st.download_button(
+                    "⬇️ 시세 CSV",
+                    show.to_csv(index=False).encode("utf-8-sig"),
+                    f"{picked_name}_{picked_code}_시세.csv", "text/csv",
+                    key="candle_dl")
+            st.caption(f"자료 출처: {src} · {s['일수']}거래일 · "
+                       f"기준일 {s['기준일']:%Y-%m-%d}")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"시세를 불러오지 못했습니다: {e}")
 
 with tab_journal:
     st.subheader("📝 매매일지")
