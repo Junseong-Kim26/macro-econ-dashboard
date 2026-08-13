@@ -24,6 +24,7 @@ import journal
 import krx_api
 import ohlc
 import scoring
+import signals
 
 load_dotenv()
 
@@ -258,10 +259,11 @@ for start in range(0, len(results), PER_ROW):
 # ---------------------------------------------------------------------------
 # 탭: 그래프 / 시장지수(콤보) / 테이블 / 점수 기준
 # ---------------------------------------------------------------------------
-(tab_graph, tab_combo, tab_table, tab_rule, tab_roepbr,
- tab_sector, tab_candle, tab_journal) = st.tabs(
-    ["📈 그래프", "📈 시장·환율·금리차", "📋 일별 테이블", "📖 점수 기준",
-     "📉 ROE·PBR 분석", "🏭 업종별 자금흐름", "🕯️ 종목 캔들차트", "📝 매매일지"]
+(tab_screen, tab_candle, tab_graph, tab_combo, tab_table,
+ tab_rule, tab_roepbr, tab_sector, tab_journal) = st.tabs(
+    ["🎯 매수 후보", "🕯️ 종목 캔들차트", "📈 그래프", "📈 시장·환율·금리차",
+     "📋 일별 테이블", "📖 점수 기준", "📉 ROE·PBR 분석",
+     "🏭 업종별 자금흐름", "📝 매매일지"]
 )
 
 # 기간 필터
@@ -1323,43 +1325,197 @@ with tab_sector:
             "붙일 수 있습니다."
         )
 
+with tab_screen:
+    st.markdown("#### 🎯 매수 후보 스크리닝")
+    st.caption(
+        "**재무(ROE·PBR)로 거른 뒤 → 차트 조건(주봉·일봉·60분봉)을 확인**해 "
+        "매수 우선순위대로 정렬합니다."
+    )
+
+    smk = st.radio("시장", list(krx_api.MARKETS.keys()),
+                   horizontal=True, key="screen_market")
+    base = journal.load_table(f"roe_pbr_stocks_{smk}")
+
+    if base is None or base.empty:
+        st.warning("먼저 **📉 ROE·PBR 분석** 탭에서 자료를 불러와 주세요.")
+    elif "종목코드" not in base.columns:
+        st.warning("저장된 자료에 종목코드가 없습니다. "
+                   "ROE·PBR 탭에서 `🔄 API로 불러오기` 를 한 번 눌러주세요.")
+    else:
+        base = base.copy()
+        base["종목코드"] = (base["종목코드"].astype(str)
+                        .str.replace(r"\D", "", regex=True).str.zfill(6))
+
+        st.markdown("##### 1단계 · 재무 조건")
+        f1, f2, f3 = st.columns(3)
+        pbr_max = f1.number_input("PBR 이하", 0.1, 50.0, 5.0, 0.5, key="sc_pbr")
+        roe_min = f2.number_input("ROE 이상 (%)", -50.0, 100.0, 10.0, 1.0, key="sc_roe")
+        top_n = f3.number_input("최대 검사 종목 수", 5, 200, 40, 5, key="sc_topn",
+                                help="종목마다 시세를 받아야 해서, 많을수록 오래 걸립니다.")
+
+        cand = base[(base["PBR"] <= pbr_max) & (base["ROE"] >= roe_min)].copy()
+        if "시가총액" in cand.columns:
+            cand = cand.sort_values("시가총액", ascending=False)
+        cand = cand.head(int(top_n))
+        st.caption(f"재무 조건 통과 **{len(base[(base['PBR'] <= pbr_max) & (base['ROE'] >= roe_min)]):,}종목** "
+                   f"중 시가총액 상위 **{len(cand)}종목**을 검사합니다 "
+                   f"(예상 {max(1, round(len(cand) * 1.6))}초).")
+
+        with st.expander("⚙️ 2단계 · 차트 조건 세부설정"):
+            eps = st.slider("기울기 판정 기준 (봉당 %)", 0.01, 0.30,
+                            float(signals.FLAT_EPS), 0.01, key="sc_eps",
+                            help="이 값 안쪽이면 '평평', 넘으면 '상승/하락'으로 봅니다. "
+                                 "작게 잡을수록 엄격해집니다.")
+            dmin, dmax = st.slider("일봉 연속 음봉 개수", 1, 8, (3, 4), key="sc_down")
+            st.markdown(
+                "**조건_1 (최소 매수 타점)** — 주봉 일목 전환선 우상향 + "
+                "일봉 연속 음봉 + 60분 5이평이 *하락→평평*\n\n"
+                "· 추가매수: 60분 5이평이 *상승각도*로 전환\n\n"
+                "**조건_2 (스윙)** — 주봉 종가가 5주이평 위 + 주봉 전환선 상승·기준선 위 "
+                "+ 60분 종가가 5이평 아래(대기) → 위로 올라서면 진입"
+            )
+
+        if st.button("🔎 스크리닝 실행", type="primary", key="sc_run"):
+            res, fails = [], []
+            pb = st.progress(0.0, text="시세를 받아 조건을 확인하는 중...")
+            for i, (_, row) in enumerate(cand.iterrows()):
+                code, name = row["종목코드"], row["종목명"]
+                try:
+                    dly, _, _ = ohlc.fetch_ohlc(code, smk, 400)
+                    h60 = ohlc.fetch_intraday(code, smk)
+                    r = signals.evaluate(dly, h60, eps=eps,
+                                         down_min=dmin, down_max=dmax)
+                    r.update({"종목명": name, "종목코드": code,
+                              "ROE": row["ROE"], "PBR": row["PBR"]})
+                    if "업종" in row.index:
+                        r["업종"] = row["업종"]
+                    res.append(r)
+                except Exception as e:  # noqa: BLE001
+                    fails.append(f"{name}({code}): {e}")
+                pb.progress((i + 1) / len(cand),
+                            text=f"확인 중... {i+1}/{len(cand)} — {name}")
+            pb.empty()
+
+            if not res:
+                st.error("검사에 성공한 종목이 없습니다.")
+            else:
+                out = pd.DataFrame(res)
+                # 신호점수 → ROE/PBR 매력도 순으로 정렬
+                out["재무매력도"] = out["ROE"] / out["PBR"].replace(0, pd.NA)
+                out = out.sort_values(["신호점수", "재무매력도"],
+                                      ascending=[False, False]).reset_index(drop=True)
+                out.insert(0, "순위", range(1, len(out) + 1))
+                st.session_state[f"screen_res_{smk}"] = out
+                journal.save_table(out, f"screen_{smk}")
+                hit = int((out["신호점수"] >= 40).sum())
+                st.success(f"{len(out)}종목 검사 완료 · **매수 신호 {hit}종목**"
+                           + (f" · 실패 {len(fails)}건" if fails else ""))
+            if fails:
+                with st.expander(f"조회 실패 {len(fails)}건"):
+                    st.write("\n".join(fails[:30]))
+
+        out = st.session_state.get(f"screen_res_{smk}")
+        if out is None:
+            saved = journal.load_table(f"screen_{smk}")
+            if saved is not None and not saved.empty:
+                out = saved
+                st.info("이전 스크리닝 결과입니다. 위 버튼으로 새로 돌리세요.")
+
+        if out is not None and not out.empty:
+            only_sig = st.checkbox("매수 신호가 있는 종목만 보기", True, key="sc_only")
+            view = out[out["신호점수"] >= 40] if only_sig else out
+            if view.empty:
+                st.warning(
+                    "지금 조건을 모두 만족하는 종목이 없습니다. "
+                    "이 조건들은 **전환이 일어나는 그 순간**만 잡아내므로 "
+                    "평소에는 잘 안 나오는 게 정상입니다. "
+                    "기울기 기준을 키우거나 음봉 개수 범위를 넓혀보세요."
+                )
+                view = out.head(15)
+                st.caption("참고로 점수 상위 15종목을 보여드립니다.")
+
+            cols = ["순위", "종목명", "신호", "신호점수", "ROE", "PBR"]
+            if "업종" in view.columns:
+                cols.insert(2, "업종")
+            show = view[cols].copy()
+            show["ROE"] = show["ROE"].round(1)
+            show["PBR"] = show["PBR"].round(2)
+            st.dataframe(show, use_container_width=True, hide_index=True,
+                         height=min(560, 40 * len(show) + 60))
+
+            st.markdown("##### 조건 충족 내역")
+            detail_cols = ["종목명", "조건1_주봉전환선우상향", "조건1_일봉연속음봉",
+                           "조건1_60분평평전환", "조건1_추가매수",
+                           "조건2_주봉5이평위", "조건2_전환선상승·기준선위",
+                           "조건2_충족", "연속음봉"]
+            have = [c for c in detail_cols if c in view.columns]
+            det = view[have].copy()
+            det.columns = [c.replace("조건1_", "①").replace("조건2_", "②")
+                           for c in det.columns]
+            st.dataframe(det, use_container_width=True, hide_index=True,
+                         height=min(400, 40 * len(det) + 60))
+            st.caption("① = 조건_1(최소 매수 타점) 요소, ② = 조건_2(스윙) 요소. "
+                       "전부 True 여야 신호가 뜹니다.")
+
+            st.download_button(
+                "⬇️ 스크리닝 결과 CSV",
+                out.to_csv(index=False).encode("utf-8-sig"),
+                f"매수후보_{smk}_{pd.Timestamp.today():%Y%m%d}.csv", "text/csv",
+                key="sc_dl")
+            st.caption(
+                "⚠️ 이 신호는 손님이 정하신 규칙을 기계적으로 계산한 결과입니다. "
+                "투자 판단과 책임은 손님에게 있으며, 재무·업황을 함께 확인하시길 권합니다."
+            )
+
 with tab_candle:
     st.markdown("#### 🕯️ 종목 캔들차트")
-    st.caption(
-        "4분면·회귀분석에서 눈에 띈 종목의 **일별 주가 흐름**을 봅니다. "
-        "시가·고가·저가·종가(캔들)와 거래량, 이동평균선을 함께 표시합니다."
-    )
+    st.caption("일봉·주봉·월봉과 주요 기술적 지표를 함께 봅니다.")
 
     cmkt = st.radio("시장", list(krx_api.MARKETS.keys()),
                     horizontal=True, key="candle_market")
 
-    # 저장된 ROE·PBR 목록에서 종목을 고르게 하고, 없으면 코드 직접 입력
     stock_tbl = journal.load_table(f"roe_pbr_stocks_{cmkt}")
     picked_code, picked_name = None, None
 
-    if stock_tbl is not None and not stock_tbl.empty and "종목코드" in stock_tbl.columns:
-        stock_tbl = stock_tbl.copy()
-        stock_tbl["종목코드"] = (stock_tbl["종목코드"].astype(str)
-                             .str.replace(r"\D", "", regex=True).str.zfill(6))
-        opts = (stock_tbl.sort_values("시가총액", ascending=False)
-                if "시가총액" in stock_tbl.columns else stock_tbl)
-        labels = [f"{r['종목명']} ({r['종목코드']})" for _, r in opts.iterrows()]
-        sel = st.selectbox("종목 선택", labels, key=f"candle_sel_{cmkt}")
-        if sel:
-            picked_name = sel.rsplit(" (", 1)[0]
-            picked_code = sel.rsplit("(", 1)[1].rstrip(")")
-    else:
-        st.info("ROE·PBR 자료가 없어 목록을 못 만듭니다. 종목코드를 직접 입력하세요.")
-
-    manual = st.text_input("또는 종목코드 직접 입력 (6자리)", "",
-                           key=f"candle_manual_{cmkt}",
-                           placeholder="예: 388210")
+    cc1, cc2 = st.columns([3, 2])
+    with cc1:
+        if (stock_tbl is not None and not stock_tbl.empty
+                and "종목코드" in stock_tbl.columns):
+            stock_tbl = stock_tbl.copy()
+            stock_tbl["종목코드"] = (stock_tbl["종목코드"].astype(str)
+                                 .str.replace(r"\D", "", regex=True).str.zfill(6))
+            opts = (stock_tbl.sort_values("시가총액", ascending=False)
+                    if "시가총액" in stock_tbl.columns else stock_tbl)
+            labels = [f"{r['종목명']} ({r['종목코드']})" for _, r in opts.iterrows()]
+            sel = st.selectbox("종목 선택", labels, key=f"candle_sel_{cmkt}")
+            if sel:
+                picked_name = sel.rsplit(" (", 1)[0]
+                picked_code = sel.rsplit("(", 1)[1].rstrip(")")
+        else:
+            st.info("ROE·PBR 자료가 없어 목록을 못 만듭니다. 코드를 직접 입력하세요.")
+    with cc2:
+        manual = st.text_input("또는 종목코드 직접 입력", "",
+                               key=f"candle_manual_{cmkt}", placeholder="예: 388210")
     if manual.strip():
         picked_code = manual.strip().zfill(6)
         picked_name = picked_name or picked_code
 
-    cperiod = st.selectbox("기간", list(ohlc.PERIODS.keys()), index=1,
-                           key="candle_period")
+    p1, p2 = st.columns(2)
+    freq_label = p1.radio("봉 주기", list(ohlc.FREQS.keys()),
+                          horizontal=True, key="candle_freq")
+    cperiod = p2.selectbox("기간", list(ohlc.PERIODS.keys()), index=2,
+                           key="candle_period",
+                           help="주봉·월봉은 기간을 길게 잡아야 봉이 충분히 생깁니다.")
+
+    st.markdown("###### 표시할 지표")
+    g1, g2, g3, g4, g5 = st.columns(5)
+    show_ma = g1.checkbox("이동평균", True, key="ck_ma")
+    show_bb = g2.checkbox("볼린저밴드", True, key="ck_bb")
+    show_ich = g3.checkbox("일목균형표", False, key="ck_ich")
+    show_macd = g4.checkbox("MACD", True, key="ck_macd")
+    show_rsi = g5.checkbox("RSI", True, key="ck_rsi")
+    vol_mult = st.slider("거래량 급증 기준 (평균 대비 배수)", 1.5, 5.0, 2.0, 0.5,
+                         key="ck_volmult")
 
     if not picked_code:
         st.warning("종목을 고르거나 종목코드를 입력해주세요.")
@@ -1367,7 +1523,7 @@ with tab_candle:
         try:
             with st.spinner(f"{picked_name} 시세를 받는 중..."):
                 bar = st.progress(0.0)
-                df, src, note = ohlc.fetch_ohlc(
+                raw, src, note = ohlc.fetch_ohlc(
                     picked_code, cmkt, ohlc.PERIODS[cperiod],
                     progress=lambda d, t: bar.progress(
                         d / t, text=f"KRX에서 하루씩 받는 중... {d}/{t}"))
@@ -1375,12 +1531,27 @@ with tab_candle:
             if note:
                 st.warning(note)
 
-            d = ohlc.add_indicators(df)
+            bars = ohlc.resample_ohlc(raw, ohlc.FREQS[freq_label])
+            # 지표마다 필요한 봉 수가 달라, 부족하면 미리 알려준다
+            need = []
+            if show_bb and len(bars) < 20:
+                need.append("볼린저밴드 20봉")
+            if show_ma and len(bars) < 60:
+                need.append("60봉 이동평균 60봉")
+            if show_ich and len(bars) < 52:
+                need.append("일목균형표 52봉")
+            if len(bars) < 5:
+                st.warning(f"{freq_label}이 {len(bars)}개뿐이라 차트를 그리기 어렵습니다. "
+                           "위에서 **기간**을 늘려주세요.")
+            elif need:
+                st.info(f"현재 {freq_label} {len(bars)}봉입니다. "
+                        f"{' · '.join(need)}이 필요해 일부 지표는 비어 보일 수 있습니다. "
+                        "**기간**을 늘리면 채워집니다.")
+            d, cloud = ohlc.add_all(bars, vol_mult=vol_mult)
             s = ohlc.summarize(d)
 
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric(f"{picked_name} 종가",
-                      f"{s['종가']:,.0f}원",
+            k1.metric(f"{picked_name} 종가", f"{s['종가']:,.0f}원",
                       f"{s['전일대비']:+,.0f} ({s['전일대비율']:+.2f}%)")
             k2.metric(f"{cperiod} 수익률", f"{s['기간수익률']:+.1f}%")
             k3.metric("기간 최고", f"{s['기간최고']:,.0f}원",
@@ -1388,72 +1559,181 @@ with tab_candle:
             k4.metric("기간 최저", f"{s['기간최저']:,.0f}원",
                       f"{s['최저일']:%y-%m-%d}", delta_color="off")
 
-            # 캔들 + 거래량 (위아래 2단, x축 공유)
-            figc = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                 row_heights=[0.72, 0.28], vertical_spacing=0.04)
+            # 표시할 지표에 따라 단(row)을 동적으로 구성
+            rows = [("price", 0.52), ("vol", 0.16)]
+            if show_macd:
+                rows.append(("macd", 0.16))
+            if show_rsi:
+                rows.append(("rsi", 0.16))
+            heights = [h for _, h in rows]
+            heights = [h / sum(heights) for h in heights]
+            rmap = {name: i + 1 for i, (name, _) in enumerate(rows)}
+
+            figc = make_subplots(rows=len(rows), cols=1, shared_xaxes=True,
+                                 row_heights=heights, vertical_spacing=0.03)
+
+            # ---- 일목 구름 (캔들 뒤에 깔리도록 먼저 그린다) ----
+            if show_ich and not cloud.empty:
+                figc.add_trace(go.Scatter(
+                    x=cloud["날짜"], y=cloud["선행스팬1"], mode="lines",
+                    name="선행스팬1", line=dict(width=0.8, color="#26a69a")),
+                    row=1, col=1)
+                figc.add_trace(go.Scatter(
+                    x=cloud["날짜"], y=cloud["선행스팬2"], mode="lines",
+                    name="선행스팬2", line=dict(width=0.8, color="#ef5350"),
+                    fill="tonexty", fillcolor="rgba(120,144,156,0.25)"),
+                    row=1, col=1)
+                for cname, col in [("전환선", "#1e88e5"), ("기준선", "#8e24aa")]:
+                    figc.add_trace(go.Scatter(
+                        x=d["날짜"], y=d[cname], mode="lines", name=cname,
+                        line=dict(width=1.2, color=col)), row=1, col=1)
+                figc.add_trace(go.Scatter(
+                    x=d["날짜"], y=d["후행스팬"], mode="lines", name="후행스팬",
+                    line=dict(width=1, color="#6d4c41", dash="dot")), row=1, col=1)
+
+            # ---- 볼린저밴드 ----
+            if show_bb:
+                figc.add_trace(go.Scatter(
+                    x=d["날짜"], y=d["BB상단"], mode="lines", name="볼린저 상단",
+                    line=dict(width=1, color="#90a4ae")), row=1, col=1)
+                figc.add_trace(go.Scatter(
+                    x=d["날짜"], y=d["BB하단"], mode="lines", name="볼린저 하단",
+                    line=dict(width=1, color="#90a4ae"),
+                    fill="tonexty", fillcolor="rgba(144,164,174,0.13)"),
+                    row=1, col=1)
+
+            # ---- 캔들 ----
             figc.add_trace(go.Candlestick(
                 x=d["날짜"], open=d["시가"], high=d["고가"],
-                low=d["저가"], close=d["종가"], name="주가",
+                low=d["저가"], close=d["종가"], name=freq_label,
                 increasing_line_color="#d62728", decreasing_line_color="#1f77b4",
                 increasing_fillcolor="#d62728", decreasing_fillcolor="#1f77b4"),
                 row=1, col=1)
 
-            for m, col in [(5, "#ff7f0e"), (20, "#2ca02c"), (60, "#9467bd")]:
-                if f"MA{m}" in d.columns:
-                    figc.add_trace(go.Scatter(
-                        x=d["날짜"], y=d[f"MA{m}"], mode="lines",
-                        name=f"{m}일 평균", line=dict(width=1.4, color=col)),
-                        row=1, col=1)
+            # ---- 이동평균 ----
+            if show_ma:
+                for m, col in [(5, "#ff7f0e"), (20, "#2ca02c"), (60, "#9467bd")]:
+                    if f"MA{m}" in d.columns:
+                        figc.add_trace(go.Scatter(
+                            x=d["날짜"], y=d[f"MA{m}"], mode="lines",
+                            name=f"MA{m}", line=dict(width=1.3, color=col)),
+                            row=1, col=1)
 
-            vol_color = ["#d62728" if c >= o else "#1f77b4"
-                         for o, c in zip(d["시가"], d["종가"])]
+            # ---- 거래량 + 급증일 ----
+            vcol = ["#d62728" if c >= o else "#1f77b4"
+                    for o, c in zip(d["시가"], d["종가"])]
             figc.add_trace(go.Bar(x=d["날짜"], y=d["거래량"], name="거래량",
-                                  marker_color=vol_color, showlegend=False),
-                           row=2, col=1)
+                                  marker_color=vcol, showlegend=False),
+                           row=rmap["vol"], col=1)
+            spikes = d[d["거래량급증"].fillna(False)]
+            if not spikes.empty:
+                figc.add_trace(go.Scatter(
+                    x=spikes["날짜"], y=spikes["거래량"], mode="markers",
+                    name=f"거래량 급증(≥{vol_mult}배)",
+                    marker=dict(size=9, color="#ffd600", symbol="star",
+                                line=dict(width=1, color="#795548"))),
+                    row=rmap["vol"], col=1)
+
+            # ---- MACD ----
+            if show_macd:
+                hcol = ["#d62728" if v >= 0 else "#1f77b4" for v in d["MACD히스토"]]
+                figc.add_trace(go.Bar(x=d["날짜"], y=d["MACD히스토"],
+                                      name="히스토그램", marker_color=hcol,
+                                      showlegend=False), row=rmap["macd"], col=1)
+                figc.add_trace(go.Scatter(
+                    x=d["날짜"], y=d["MACD"], mode="lines", name="MACD",
+                    line=dict(width=1.3, color="#1e88e5")), row=rmap["macd"], col=1)
+                figc.add_trace(go.Scatter(
+                    x=d["날짜"], y=d["MACD신호"], mode="lines", name="신호선",
+                    line=dict(width=1.1, color="#ef6c00")), row=rmap["macd"], col=1)
+
+            # ---- RSI ----
+            if show_rsi:
+                figc.add_trace(go.Scatter(
+                    x=d["날짜"], y=d["RSI"], mode="lines", name="RSI",
+                    line=dict(width=1.4, color="#6a1b9a")), row=rmap["rsi"], col=1)
+                for lv, lcol in [(70, "#d62728"), (30, "#1f77b4")]:
+                    figc.add_hline(y=lv, line_dash="dash", line_color=lcol,
+                                   line_width=1, row=rmap["rsi"], col=1)
+                figc.update_yaxes(range=[0, 100], row=rmap["rsi"], col=1)
 
             figc.update_layout(
-                height=620, margin=dict(l=50, r=20, t=30, b=20),
+                height=260 + 180 * len(rows), margin=dict(l=55, r=20, t=30, b=20),
                 xaxis_rangeslider_visible=False, hovermode="x unified",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                            xanchor="left", x=0))
-            figc.update_yaxes(title_text="주가 (원)", row=1, col=1)
-            figc.update_yaxes(title_text="거래량", row=2, col=1)
-            # 휴장일 빈칸 제거
-            figc.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+                barmode="overlay",
+                legend=dict(orientation="h", yanchor="bottom", y=1.01,
+                            xanchor="left", x=0, font=dict(size=10)))
+            figc.update_yaxes(title_text="주가(원)", row=1, col=1)
+            figc.update_yaxes(title_text="거래량", row=rmap["vol"], col=1)
+            if show_macd:
+                figc.update_yaxes(title_text="MACD", row=rmap["macd"], col=1)
+            if show_rsi:
+                figc.update_yaxes(title_text="RSI", row=rmap["rsi"], col=1)
+            if ohlc.FREQS[freq_label] == "D":
+                figc.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
             st.plotly_chart(figc, use_container_width=True)
 
-            # 이동평균 대비 현재 위치 = 추세 판단의 기본
-            st.markdown("##### 이동평균선 대비 위치")
-            rows = []
-            for m in (5, 20, 60):
-                c = f"MA{m}"
-                if c in d.columns and pd.notna(d[c].iloc[-1]):
-                    ma = float(d[c].iloc[-1])
-                    gap = (s["종가"] / ma - 1) * 100
-                    rows.append({"이동평균": f"{m}일", "평균가": f"{ma:,.0f}원",
-                                 "현재가 대비": f"{gap:+.1f}%",
-                                 "위치": "위 (강세)" if gap >= 0 else "아래 (약세)"})
-            if rows:
-                st.dataframe(pd.DataFrame(rows), use_container_width=True,
+            # ---- 현재 상태 요약 ----
+            st.markdown("##### 지금 지표는 무엇을 말하나")
+            last = d.iloc[-1]
+            msgs = []
+            if show_ma:
+                for m in (5, 20, 60):
+                    cn = f"MA{m}"
+                    if cn in d.columns and pd.notna(last[cn]):
+                        gap = (last["종가"] / last[cn] - 1) * 100
+                        msgs.append({
+                            "지표": f"{m}봉 이동평균", "값": f"{last[cn]:,.0f}원",
+                            "해석": f"현재가가 {gap:+.1f}% "
+                                  + ("위 (상승 추세)" if gap >= 0 else "아래 (하락 추세)")})
+            if show_bb and pd.notna(last.get("BB위치")):
+                pos = float(last["BB위치"])
+                msgs.append({"지표": "볼린저밴드", "값": f"밴드 내 {pos*100:.0f}% 지점",
+                             "해석": ("상단 근처 — 단기 과열 주의" if pos > 0.8 else
+                                    "하단 근처 — 과매도 구간" if pos < 0.2 else
+                                    "중간 — 방향성 뚜렷하지 않음")})
+            if show_rsi and pd.notna(last.get("RSI")):
+                rv = float(last["RSI"])
+                msgs.append({"지표": "RSI(14)", "값": f"{rv:.1f}",
+                             "해석": ("70 이상 — 과열(단기 조정 가능)" if rv >= 70 else
+                                    "30 이하 — 침체(반등 가능)" if rv <= 30 else
+                                    "30~70 — 중립")})
+            if show_macd and pd.notna(last.get("MACD")):
+                hv = float(last["MACD히스토"])
+                msgs.append({"지표": "MACD",
+                             "값": f"{last['MACD']:,.1f} / 신호 {last['MACD신호']:,.1f}",
+                             "해석": ("신호선 위 — 상승 신호" if hv >= 0
+                                    else "신호선 아래 — 하락 신호")})
+            if show_ich and pd.notna(last.get("기준선")):
+                base_v = float(last["기준선"])
+                msgs.append({"지표": "일목 기준선", "값": f"{base_v:,.0f}원",
+                             "해석": ("기준선 위 — 강세" if last["종가"] >= base_v
+                                    else "기준선 아래 — 약세")})
+            if pd.notna(last.get("거래량배수")):
+                mlt = float(last["거래량배수"])
+                msgs.append({"지표": "거래량", "값": f"평균의 {mlt:.1f}배",
+                             "해석": ("급증 — 관심 집중" if mlt >= vol_mult
+                                    else "평소 수준")})
+            if msgs:
+                st.dataframe(pd.DataFrame(msgs), use_container_width=True,
                              hide_index=True)
-                st.caption(
-                    "현재가가 이동평균선 **위**에 있으면 그 기간 평균보다 비싸게 "
-                    "거래되는 것(상승 추세), **아래**면 그 반대입니다. "
-                    "5일은 단기, 20일은 한 달, 60일은 분기 흐름을 봅니다."
-                )
+            st.caption(
+                "⚠️ 기술적 지표는 과거 가격의 통계일 뿐이며 미래를 보장하지 않습니다. "
+                "재무(ROE·PBR)와 함께 보시길 권합니다."
+            )
 
-            with st.expander("📋 일별 시세 표 / 내려받기"):
+            with st.expander("📋 봉 데이터 표 / 내려받기"):
                 show = d.copy()
                 show["날짜"] = show["날짜"].dt.strftime("%Y-%m-%d")
-                num = [c for c in show.columns if c != "날짜"]
                 st.dataframe(show.sort_values("날짜", ascending=False).round(1),
                              use_container_width=True, hide_index=True, height=320)
                 st.download_button(
-                    "⬇️ 시세 CSV",
+                    "⬇️ 시세·지표 CSV",
                     show.to_csv(index=False).encode("utf-8-sig"),
-                    f"{picked_name}_{picked_code}_시세.csv", "text/csv",
+                    f"{picked_name}_{picked_code}_{freq_label}.csv", "text/csv",
                     key="candle_dl")
-            st.caption(f"자료 출처: {src} · {s['일수']}거래일 · "
+
+            st.caption(f"출처 {src} · {freq_label} {len(d)}봉 · "
                        f"기준일 {s['기준일']:%Y-%m-%d}")
         except Exception as e:  # noqa: BLE001
             st.error(f"시세를 불러오지 못했습니다: {e}")
