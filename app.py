@@ -135,6 +135,25 @@ def get_dart(year, rcode, codes_fn, progress=None):
             "주가·시가총액은 방금 KRX에서 받은 최신 값입니다.")
 
 
+def comma(df, dec=None):
+    """표의 숫자에 천단위 쉼표를 붙여 보여준다(정렬은 그대로 숫자 기준).
+
+    dec = {"컬럼명": 소수자릿수}. 지정 안 한 숫자 컬럼은 정수로 본다.
+    """
+    dec = dec or {}
+    fmt = {}
+    for c in df.columns:
+        if not pd.api.types.is_numeric_dtype(df[c]):
+            continue
+        d = dec.get(c)
+        if d is None:
+            # 소수가 실제로 들어 있으면 2자리, 아니면 정수
+            vals = df[c].dropna()
+            d = 2 if (len(vals) and (vals % 1 != 0).any()) else 0
+        fmt[c] = f"{{:,.{d}f}}"
+    return df.style.format(fmt, na_rep="-") if fmt else df
+
+
 def _q_table(df, keep_quadrant=False):
     """4분면 화면·다운로드에서 공통으로 쓰는 표 모양 정리."""
     cols = (["분면"] if keep_quadrant and "분면" in df.columns else []) + \
@@ -346,7 +365,7 @@ with tab_table:
     rename = {v["key"]: v["name"] for v in config.VARIABLES if v["key"] in view.columns}
     table = view.rename(columns=rename).sort_index(ascending=False).round(2)
     table.index = table.index.strftime("%Y-%m-%d")
-    st.dataframe(table, use_container_width=True, height=500)
+    st.dataframe(comma(table), use_container_width=True, height=500)
 
     # 다운로드 (CSV / Excel)
     c1, c2 = st.columns(2)
@@ -661,7 +680,7 @@ with tab_roepbr:
                         if not sub.empty:
                             with st.expander(f"{qname} 종목 보기 ({len(sub)}개)"):
                                 show = _q_table(sub)
-                                st.dataframe(show, use_container_width=True,
+                                st.dataframe(comma(show), use_container_width=True,
                                              hide_index=True)
                                 st.download_button(
                                     f"⬇️ {qname} {len(sub)}개 CSV",
@@ -740,7 +759,7 @@ with tab_roepbr:
                         legend=dict(orientation="h", yanchor="bottom", y=1.02,
                                     xanchor="left", x=0))
                     st.plotly_chart(figg, use_container_width=True)
-                    st.dataframe(g.round(2), use_container_width=True, hide_index=True)
+                    st.dataframe(comma(g), use_container_width=True, hide_index=True)
                     st.info(
                         "종목을 ROE 순으로 같은 개수씩 묶어 중앙값을 찍은 그림입니다. "
                         "개별 종목의 잡음이 상쇄돼 **ROE가 높을수록 PBR이 높다**는 추세가 "
@@ -807,17 +826,17 @@ with tab_roepbr:
                     st.markdown("###### 선택 종목 위치")
                     hi = res[res["종목명"].isin(picked)][
                         ["종목명", "ROE", "PBR", "예측", "잔차", "평가"]]
-                    st.dataframe(hi.round(3), use_container_width=True, hide_index=True)
+                    st.dataframe(comma(hi), use_container_width=True, hide_index=True)
 
                 c1, c2 = st.columns(2)
                 cols = ["종목명", "ROE", "PBR", "예측", "잔차"]
                 with c1:
                     st.markdown("###### 회귀선 아래 (상대 저평가) 20")
-                    st.dataframe(res.nsmallest(20, "잔차")[cols].round(3),
+                    st.dataframe(comma(res.nsmallest(20, "잔차")[cols]),
                                  use_container_width=True, hide_index=True)
                 with c2:
                     st.markdown("###### 회귀선 위 (상대 고평가) 20")
-                    st.dataframe(res.nlargest(20, "잔차")[cols].round(3),
+                    st.dataframe(comma(res.nlargest(20, "잔차")[cols]),
                                  use_container_width=True, hide_index=True)
 
                 st.download_button(
@@ -1301,7 +1320,7 @@ with tab_sector:
             with st.expander("📋 전체 표 보기 / 내려받기"):
                 show = (piv / unit).round(3)
                 show.index = show.index.strftime("%Y-%m-%d")
-                st.dataframe(show, use_container_width=True)
+                st.dataframe(comma(show), use_container_width=True)
                 xb = io.BytesIO()
                 with pd.ExcelWriter(xb, engine="openpyxl") as w:
                     show.to_excel(w, sheet_name=f"{metric}(조원)")
@@ -1478,7 +1497,7 @@ with tab_screen:
             if "BB위치" in show.columns:
                 show["BB위치"] = show["BB위치"].astype(float).round(2)
                 show = show.rename(columns={"BB위치": "볼린저%B"})
-            st.dataframe(show, use_container_width=True, hide_index=True,
+            st.dataframe(comma(show), use_container_width=True, hide_index=True,
                          height=min(560, 40 * len(show) + 60))
 
             st.markdown("##### 조건 충족 내역")
@@ -1769,7 +1788,7 @@ with tab_candle:
             with st.expander("📋 봉 데이터 표 / 내려받기"):
                 show = d.copy()
                 show["날짜"] = show["날짜"].dt.strftime("%Y-%m-%d")
-                st.dataframe(show.sort_values("날짜", ascending=False).round(1),
+                st.dataframe(comma(show.sort_values("날짜", ascending=False)),
                              use_container_width=True, hide_index=True, height=320)
                 st.download_button(
                     "⬇️ 시세·지표 CSV",
@@ -1791,13 +1810,18 @@ with tab_journal:
     if not _unlocked:
         # 공개 앱이므로, 비밀번호를 아는 사람만 열람/작성
         st.info("매매일지는 비공개입니다. 비밀번호를 입력하세요.")
-        entered = st.text_input("비밀번호", type="password", key="journal_pw")
-        if st.button("열기"):
+        # form 으로 감싸면 입력칸에서 **엔터**만 쳐도 제출된다
+        with st.form("journal_login", clear_on_submit=False):
+            entered = st.text_input("비밀번호", type="password", key="journal_pw")
+            submitted = st.form_submit_button("열기")
+        if submitted:
             if entered == _pw:
                 st.session_state["journal_ok"] = True
                 st.rerun()
             else:
                 st.error("비밀번호가 맞지 않습니다.")
+        else:
+            st.caption("비밀번호를 입력하고 **엔터**를 치거나 `열기` 를 누르세요.")
     elif journal.get_client() is None:
         st.warning(
             "Dropbox 연결 정보가 없어 매매일지를 저장할 수 없습니다. "
@@ -1983,7 +2007,7 @@ with tab_journal:
                     if not day_pf.empty:
                         st.caption("보유내역 (백만원)" if is_own
                                    else "보유내역 (백만원) — 직전 기록 유지")
-                        st.dataframe(day_pf, use_container_width=True, hide_index=True)
+                        st.dataframe(comma(day_pf), use_container_width=True, hide_index=True)
 
             c1, c2 = st.columns(2)
             c1.download_button(
