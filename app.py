@@ -196,9 +196,19 @@ period = st.sidebar.selectbox(
 period_days = {"1년": 365, "3년": 365 * 3, "5년": 365 * 5, "전체": None}[period]
 
 if st.sidebar.button("🔄 데이터 새로고침 (캐시 무시)"):
+    # 캐시를 쓰는 로더를 하나라도 빠뜨리면 그 탭만 옛날 값이 남는다.
+    # 새 로더를 추가하면 여기에도 반드시 넣을 것.
     load_frame.clear()
     load_combo.clear()
+    load_aicredit.clear()
+    load_aicredit_charts.clear()
+    # parquet 디스크 캐시(기본 12시간)도 건너뛰어야 실제로 새로 받아온다.
+    # 파일을 지우지는 않는다 — 조회가 실패하면 옛 캐시로 폴백해야 하기 때문.
+    st.session_state["force_refresh"] = True
     st.rerun()
+
+# 새로고침을 누른 직후 한 번만 캐시를 건너뛴다
+USE_CACHE = not st.session_state.pop("force_refresh", False)
 
 # ---------------------------------------------------------------------------
 # 데이터 로드 & 점수 계산
@@ -209,7 +219,7 @@ if not keys["fred"]:
             "발급: https://fred.stlouisfed.org → My Account → API Keys (무료)")
     st.stop()
 
-frame, errors = load_frame(keys, use_cache=True)
+frame, errors = load_frame(keys, use_cache=USE_CACHE)
 for e in errors:
     st.sidebar.error(e)
 
@@ -322,7 +332,7 @@ with tab_graph:
         st.plotly_chart(fig, use_container_width=True)
 
 with tab_combo:
-    combo_data, combo_errors = load_combo(keys, use_cache=True)
+    combo_data, combo_errors = load_combo(keys, use_cache=USE_CACHE)
     for e in combo_errors:
         st.warning(e)
 
@@ -1838,7 +1848,7 @@ with tab_aicredit:
             "구조적 사건은 아래 체크리스트로 따로 기록합니다."
         )
 
-    ai_series, ai_errors = load_aicredit(keys, True)
+    ai_series, ai_errors = load_aicredit(keys, USE_CACHE)
     for e in ai_errors:
         st.warning(e)
 
@@ -1921,7 +1931,7 @@ with tab_aicredit:
 
     # ----- 그래프 -----
     st.markdown("##### 그래프")
-    ai_cdata, ai_cerrors = load_aicredit_charts(keys, True)
+    ai_cdata, ai_cerrors = load_aicredit_charts(keys, USE_CACHE)
     for e in ai_cerrors:
         st.warning(e)
 
