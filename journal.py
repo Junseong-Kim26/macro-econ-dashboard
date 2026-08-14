@@ -37,12 +37,24 @@ def _cfg():
         return {}
 
 
-def journal_path():
-    return _cfg().get("journal_path", DEFAULT_PATH)
+# 매매일지를 쓰는 사람. 사람마다 파일이 따로 저장된다(내용 구성은 동일).
+PEOPLE = ["김준성", "윤송희"]
 
 
-def portfolio_path():
-    return _cfg().get("portfolio_path", DEFAULT_PF_PATH)
+def _with_person(path, person):
+    """/apps/.../trade_journal.csv + 김준성 → /apps/.../trade_journal_김준성.csv"""
+    if not person:
+        return path
+    base, dot, ext = path.rpartition(".")
+    return f"{base}_{person}{dot}{ext}" if dot else f"{path}_{person}"
+
+
+def journal_path(person=None):
+    return _with_person(_cfg().get("journal_path", DEFAULT_PATH), person)
+
+
+def portfolio_path(person=None):
+    return _with_person(_cfg().get("portfolio_path", DEFAULT_PF_PATH), person)
 
 
 def get_client():
@@ -78,13 +90,13 @@ def empty_df():
     return pd.DataFrame(columns=COLUMNS)
 
 
-def load(dbx=None):
+def load(person=None, dbx=None):
     """Dropbox에서 매매일지를 읽어 DataFrame으로 반환."""
     dbx = dbx or get_client()
     if dbx is None:
         return empty_df()
     try:
-        _, res = dbx.files_download(journal_path())
+        _, res = dbx.files_download(journal_path(person))
         df = pd.read_csv(io.BytesIO(res.content))
     except Exception:
         # 파일이 아직 없거나 접근 실패 → 빈 일지로 시작
@@ -99,7 +111,7 @@ def load(dbx=None):
     return df[COLUMNS].sort_values("날짜", ascending=False).reset_index(drop=True)
 
 
-def save(df, dbx=None):
+def save(df, person=None, dbx=None):
     """DataFrame을 Dropbox CSV로 저장. 성공 여부 반환."""
     dbx = dbx or get_client()
     if dbx is None:
@@ -108,7 +120,8 @@ def save(df, dbx=None):
         import dropbox as _dbx_mod
 
         data = df[COLUMNS].to_csv(index=False).encode("utf-8")
-        dbx.files_upload(data, journal_path(), mode=_dbx_mod.files.WriteMode.overwrite)
+        dbx.files_upload(data, journal_path(person),
+                         mode=_dbx_mod.files.WriteMode.overwrite)
         return True, None
     except Exception as e:  # noqa: BLE001
         return False, f"저장 중 오류가 발생했습니다: {e}"
@@ -141,13 +154,13 @@ def empty_pf():
     return pd.DataFrame(columns=PF_COLUMNS)
 
 
-def load_portfolio(dbx=None):
+def load_portfolio(person=None, dbx=None):
     """Dropbox에서 자산 운용내역을 읽어 DataFrame으로 반환."""
     dbx = dbx or get_client()
     if dbx is None:
         return empty_pf()
     try:
-        _, res = dbx.files_download(portfolio_path())
+        _, res = dbx.files_download(portfolio_path(person))
         df = pd.read_csv(io.BytesIO(res.content))
     except Exception:
         return empty_pf()
@@ -162,7 +175,7 @@ def load_portfolio(dbx=None):
     return df[PF_COLUMNS].reset_index(drop=True)
 
 
-def save_portfolio(df, dbx=None):
+def save_portfolio(df, person=None, dbx=None):
     """자산 운용내역을 Dropbox CSV로 저장."""
     dbx = dbx or get_client()
     if dbx is None:
@@ -171,7 +184,8 @@ def save_portfolio(df, dbx=None):
         import dropbox as _dbx_mod
 
         data = df[PF_COLUMNS].to_csv(index=False).encode("utf-8")
-        dbx.files_upload(data, portfolio_path(), mode=_dbx_mod.files.WriteMode.overwrite)
+        dbx.files_upload(data, portfolio_path(person),
+                         mode=_dbx_mod.files.WriteMode.overwrite)
         return True, None
     except Exception as e:  # noqa: BLE001
         return False, f"자산 내역 저장 중 오류가 발생했습니다: {e}"

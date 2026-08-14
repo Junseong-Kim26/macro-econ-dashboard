@@ -1805,8 +1805,12 @@ with tab_journal:
             "`[dropbox]` 설정을 확인하세요."
         )
     else:
-        jdf = journal.load()
-        pdf = journal.load_portfolio()
+        # 사람별로 파일이 따로 저장된다(화면 구성은 동일)
+        who = st.radio("작성자", journal.PEOPLE, horizontal=True, key="journal_who")
+        st.caption(f"**{who}** 님의 매매일지입니다. 작성자를 바꾸면 그 사람의 기록이 열립니다.")
+
+        jdf = journal.load(who)
+        pdf = journal.load_portfolio(who)
 
         # 날짜 선택 (일지와 자산내역이 같은 날짜를 공유)
         j_date = st.date_input("날짜", value=pd.Timestamp.today().date())
@@ -1850,7 +1854,7 @@ with tab_journal:
                 today_pf = pd.DataFrame({"종목명": ["", "", ""], "금액": [0.0, 0.0, 0.0]})
 
             # 입력 중인 표를 세션에 보관 → 엔터(재실행) 후에도 입력값이 남는다.
-            pf_state_key = f"pf_rows_{date_str}"
+            pf_state_key = f"pf_rows_{who}_{date_str}"
             if pf_state_key not in st.session_state:
                 st.session_state[pf_state_key] = today_pf.reset_index(drop=True)
 
@@ -1883,12 +1887,12 @@ with tab_journal:
                 ok_all = True
                 if has_journal:
                     newdf = journal.upsert(jdf, date_str, j_summary.strip(), j_body.strip())
-                    ok, err = journal.save(newdf)
+                    ok, err = journal.save(newdf, who)
                     ok_all &= ok
                     msgs.append("일지 저장" if ok else f"일지 실패: {err}")
                 if has_pf:
                     newpf = journal.upsert_portfolio(pdf, date_str, edited_pf)
-                    ok, err = journal.save_portfolio(newpf)
+                    ok, err = journal.save_portfolio(newpf, who)
                     ok_all &= ok
                     msgs.append("자산내역 저장" if ok else f"자산내역 실패: {err}")
                 if ok_all:
@@ -1985,10 +1989,10 @@ with tab_journal:
             c1.download_button(
                 "⬇️ 매매일지 CSV",
                 jdf.to_csv(index=False).encode("utf-8-sig"),
-                "매매일지.csv", "text/csv",
+                f"매매일지_{who}.csv", "text/csv",
             )
             c2.download_button(
                 "⬇️ 자산내역 CSV",
                 pdf.to_csv(index=False).encode("utf-8-sig"),
-                "자산운용내역.csv", "text/csv",
+                f"자산운용내역_{who}.csv", "text/csv",
             )
