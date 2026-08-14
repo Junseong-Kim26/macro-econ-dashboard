@@ -16,6 +16,7 @@ from plotly.subplots import make_subplots
 import streamlit as st
 from dotenv import load_dotenv
 
+import aicredit
 import config
 import dart_api
 import data as data_mod
@@ -57,6 +58,16 @@ def load_frame(keys, use_cache):
 @st.cache_data(ttl=3600, show_spinner="시장지수를 불러오는 중...")
 def load_combo(keys, use_cache):
     return data_mod.load_combo_series(config.COMBO_CHARTS, keys, use_cache=use_cache)
+
+
+@st.cache_data(ttl=3600, show_spinner="AI크레딧 지표를 불러오는 중...")
+def load_aicredit(keys, use_cache):
+    return aicredit.load_series(config.AI_CREDIT_INDICATORS, keys, use_cache=use_cache)
+
+
+@st.cache_data(ttl=3600, show_spinner="AI크레딧 그래프를 불러오는 중...")
+def load_aicredit_charts(keys, use_cache):
+    return data_mod.load_combo_series(config.AI_CREDIT_CHARTS, keys, use_cache=use_cache)
 
 
 def fmt(value, decimals, unit):
@@ -279,10 +290,10 @@ for start in range(0, len(results), PER_ROW):
 # 탭: 그래프 / 시장지수(콤보) / 테이블 / 점수 기준
 # ---------------------------------------------------------------------------
 (tab_screen, tab_candle, tab_graph, tab_combo, tab_table,
- tab_rule, tab_roepbr, tab_sector, tab_journal) = st.tabs(
+ tab_rule, tab_roepbr, tab_sector, tab_aicredit, tab_journal) = st.tabs(
     ["🎯 매수 후보", "🕯️ 종목 캔들차트", "📈 그래프", "📈 시장·환율·금리차",
      "📋 일별 테이블", "📖 점수 기준", "📉 ROE·PBR 분석",
-     "🏭 업종별 자금흐름", "📝 매매일지"]
+     "🏭 업종별 자금흐름", "🏗️ AI크레딧 모니터", "📝 매매일지"]
 )
 
 # 기간 필터
@@ -1115,12 +1126,16 @@ with tab_roepbr:
 
                 if "날짜" in idf.columns:
                     figt = make_subplots(specs=[[{"secondary_y": True}]])
+                    # add_trace 의 두 번째 위치인자는 row 다. secondary_y 는
+                    # 반드시 키워드로 넘겨야 한다(안 그러면 row=False 로 들어가 오류).
                     figt.add_trace(go.Scatter(x=idf["날짜"], y=idf["지수"], mode="lines",
                                               name=f"{mkt}지수",
-                                              line=dict(width=2, color="#1f77b4")), False)
+                                              line=dict(width=2, color="#1f77b4")),
+                                   secondary_y=False)
                     figt.add_trace(go.Scatter(x=idf["날짜"], y=idf["PBR"], mode="lines",
                                               name="PBR",
-                                              line=dict(width=2, color="#ff7f0e")), True)
+                                              line=dict(width=2, color="#ff7f0e")),
+                                   secondary_y=True)
                     figt.update_layout(title="지수 · PBR 시계열", height=340,
                                        margin=dict(l=50, r=50, t=40, b=20),
                                        hovermode="x unified",
@@ -1800,6 +1815,367 @@ with tab_candle:
                        f"기준일 {s['기준일']:%Y-%m-%d}")
         except Exception as e:  # noqa: BLE001
             st.error(f"시세를 불러오지 못했습니다: {e}")
+
+# ---------------------------------------------------------------------------
+# AI · 데이터센터 크레딧 모니터 (기존 종합점수와 완전 분리된 별도 위험지수)
+# ---------------------------------------------------------------------------
+with tab_aicredit:
+    st.markdown("#### 🏗️ AI · 데이터센터 크레딧 모니터")
+    st.caption(
+        "AI 데이터센터에 돈을 대는 채권시장이 얼마나 위험해졌는지 봅니다. "
+        "**이 점수만 방향이 반대입니다 — 높을수록 위험**합니다. "
+        "위 종합점수(주식 환경)와는 별개로 계산되며 서로 영향을 주지 않습니다."
+    )
+
+    with st.expander("이 탭을 만든 이유 (배경 3줄)"):
+        st.markdown(
+            "- SEC는 2026-07-29 해석서한에서 **특정 구조의 데이터센터 유동화증권을 "
+            "ABS(자산유동화증권)가 아니라고** 판단했습니다.\n"
+            "- 그 결과 자산단위 공시, 조성자 위험보유 5%, 제3자 실사 공시 같은 "
+            "**투자자 보호 장치가 면제**됐습니다. 구조는 ABS인데 보호장치만 벗겨진 상태입니다.\n"
+            "- 발행 통계·계약조건은 유료 데이터라 자동수집이 안 됩니다. 그래서 "
+            "**시장에서 먼저 움직이는 대리지표(프록시)로 감시**하고, 숫자로 안 잡히는 "
+            "구조적 사건은 아래 체크리스트로 따로 기록합니다."
+        )
+
+    ai_series, ai_errors = load_aicredit(keys, True)
+    for e in ai_errors:
+        st.warning(e)
+
+    ai_results, ai_auto = aicredit.score_auto(ai_series)
+
+    # ----- 체크리스트 먼저 읽어와야 최종 지수를 계산할 수 있다 -----
+    if "ai_checklist" not in st.session_state:
+        st.session_state["ai_checklist"] = aicredit.load_checklist()
+    ai_check = st.session_state["ai_checklist"]
+    ai_points, ai_hits = aicredit.checklist_points(ai_check)
+    ai_index = aicredit.total_index(ai_auto, ai_points)
+    ai_label, ai_color, ai_desc = aicredit.interpret(ai_index)
+
+    # ----- 상단 위험지수 -----
+    c1, c2, c3 = st.columns([2, 1, 1])
+    with c1:
+        st.markdown(
+            f"<div style='padding:14px 18px;border-radius:10px;"
+            f"background:{ai_color}22;border-left:8px solid {ai_color}'>"
+            f"<div style='font-size:13px;color:#666'>AI크레딧 위험지수 "
+            f"(0~100, 높을수록 위험)</div>"
+            f"<div style='font-size:34px;font-weight:700;color:{ai_color}'>"
+            f"{ai_index if ai_index is not None else '-'} "
+            f"<span style='font-size:19px'>{ai_label}</span></div></div>",
+            unsafe_allow_html=True,
+        )
+    c2.metric("자동지표 점수", f"{ai_auto}" if ai_auto is not None else "-",
+              help="FRED·야후파이낸스에서 자동으로 받아 계산한 부분입니다.")
+    c3.metric("체크리스트 가점", f"+{ai_points}",
+              help=f"정성 체크리스트에서 체크된 항목의 가점 합계 "
+                   f"(최대 +{aicredit.checklist_max_points()}). 100을 넘지 않습니다.")
+
+    if ai_desc:
+        st.info(ai_desc)
+    if ai_hits:
+        st.error("구조적 경고 신호가 켜져 있습니다 — "
+                 + " / ".join(h["label"] for h in ai_hits))
+
+    st.divider()
+
+    # ----- 1층: 자동수집 지표 -----
+    st.markdown("##### 1층 · 자동수집 지표")
+    st.caption(
+        "**수준**은 지금 값이 어느 구간인지, **추세**는 최근 3개월 동안 위험한 쪽으로 "
+        "움직였는지입니다. 둘 다 1~5점이고 **5가 가장 위험**합니다. "
+        "최종점수 = 반올림(수준×0.5 + 추세×0.5)."
+    )
+
+    ai_rows = []
+    for r in ai_results:
+        ai_rows.append({
+            "지표": r["name"],
+            "현재값": fmt(r["current"], r["decimals"], r["unit"]),
+            "3개월 전": fmt(r["past"], r["decimals"], r["unit"]),
+            "수준": r["level"],
+            "추세": r["trend"],
+            "위험점수": r["final"],
+            "가중치": r["weight"],
+            "기준일": r["asof"].strftime("%Y-%m-%d") if r["asof"] is not None else "-",
+        })
+    ai_df = pd.DataFrame(ai_rows)
+
+    def _risk_color(v):
+        palette = {1: "#1a9850", 2: "#a6d96a", 3: "#fee08b", 4: "#f46d43", 5: "#d73027"}
+        try:
+            return f"background-color:{palette[int(v)]}55"
+        except Exception:  # noqa: BLE001
+            return ""
+
+    st.dataframe(
+        ai_df.style.map(_risk_color, subset=["수준", "추세", "위험점수"]),
+        use_container_width=True, hide_index=True,
+    )
+
+    with st.expander("각 지표가 무엇을 뜻하는지"):
+        for r in ai_results:
+            st.markdown(f"**{r['name']}** (가중치 {r['weight']})  \n{r['why']}")
+
+    st.divider()
+
+    # ----- 그래프 -----
+    st.markdown("##### 그래프")
+    ai_cdata, ai_cerrors = load_aicredit_charts(keys, True)
+    for e in ai_cerrors:
+        st.warning(e)
+
+    for chart in config.AI_CREDIT_CHARTS:
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        for spec in chart["series"]:
+            s = ai_cdata.get(spec["id"], pd.Series(dtype="float64")).dropna()
+            if s.empty or not isinstance(s.index, pd.DatetimeIndex):
+                continue
+            if cutoff is not None:
+                s = s[s.index >= cutoff]
+            if s.empty:
+                continue
+            # rebase: 스케일이 다른 가격들을 겹쳐 보기 위해 구간 첫날을 100으로 환산
+            if chart.get("rebase"):
+                base = float(s.iloc[0])
+                if base == 0:
+                    continue
+                s = s / base * 100.0
+            fig.add_trace(
+                go.Scatter(x=s.index, y=s.values, mode="lines", name=spec["label"],
+                           line=dict(width=2, color=spec["color"])),
+                secondary_y=(spec["axis"] == "right"),
+            )
+
+        fig.update_layout(
+            title=chart["title"],
+            height=430, margin=dict(l=50, r=50, t=50, b=20),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        )
+        fig.update_yaxes(title_text=chart.get("left_title", ""), secondary_y=False)
+        fig.update_yaxes(title_text=chart.get("right_title", ""), secondary_y=True)
+        if chart.get("rebase"):
+            fig.add_hline(y=100, line_dash="dash", line_color="gray",
+                          annotation_text="구간 시작(=100)",
+                          annotation_position="bottom right")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.divider()
+
+    # ----- 3층: 정성 체크리스트 -----
+    st.markdown("##### 3층 · 정성 체크리스트")
+    st.caption(
+        "숫자로 잡히지 않는 구조적 사건입니다. **뉴스·리서치에서 확인되면 체크**하고 "
+        "확인일자와 근거를 적어 두세요. 체크된 항목의 가점이 위험지수에 더해집니다. "
+        "**빼지는 않습니다** — 한 번 열린 구조적 통로는 닫히지 않는다고 보기 때문입니다."
+    )
+
+    _defs = {c["key"]: c for c in config.AI_CREDIT_CHECKLIST}
+    edit_df = ai_check.copy()
+    edit_df["항목명"] = edit_df["항목"].map(lambda k: _defs[k]["label"])
+    edit_df["가점"] = edit_df["항목"].map(lambda k: _defs[k]["points"])
+
+    edited = st.data_editor(
+        edit_df[["항목명", "가점", "확인", "확인일자", "메모"]],
+        use_container_width=True, hide_index=True, key="ai_check_editor",
+        column_config={
+            "항목명": st.column_config.TextColumn("항목", disabled=True, width="large"),
+            "가점": st.column_config.NumberColumn("가점", disabled=True, width="small"),
+            "확인": st.column_config.CheckboxColumn("확인됨", width="small"),
+            "확인일자": st.column_config.TextColumn("확인일자", width="small",
+                                                help="예: 2026-08-14"),
+            "메모": st.column_config.TextColumn("근거·메모", width="large"),
+        },
+    )
+
+    b1, b2 = st.columns([1, 4])
+
+    # 직전 저장 결과를 rerun 이후에도 보여준다 (rerun 하면 그 자리 메시지는 지워지므로)
+    _msg = st.session_state.pop("ai_check_msg", None)
+    if _msg:
+        (b2.success if _msg[0] else b2.error)(_msg[1])
+
+    if b1.button("💾 체크리스트 저장", key="ai_check_save"):
+        new_df = ai_check.copy()
+        new_df["확인"] = edited["확인"].astype(bool).values
+        new_df["확인일자"] = edited["확인일자"].fillna("").astype(str).values
+        new_df["메모"] = edited["메모"].fillna("").astype(str).values
+        ok, err = aicredit.save_checklist(new_df)
+        st.session_state["ai_checklist"] = new_df
+        st.session_state["ai_check_msg"] = (
+            (True, "저장했습니다. 위험지수를 다시 계산했습니다.") if ok
+            else (False, f"저장 실패: {err} "
+                         "(화면에는 반영됐지만 다음 접속 때 사라집니다)")
+        )
+        # 성공·실패 어느 쪽이든 위쪽 위험지수를 새 체크 상태로 다시 그린다
+        st.rerun()
+
+    with st.expander("각 항목이 왜 중요한지"):
+        for c in config.AI_CREDIT_CHECKLIST:
+            st.markdown(f"**{c['label']}** (가점 +{c['points']})  \n{c['why']}")
+
+    st.divider()
+
+    # ----- 하단: 이 점수를 처음 보는 사람을 위한 설명 -----
+    with st.expander("📖 이 점수가 무엇이고 어떻게 읽나요 (처음이시면 꼭 읽어보세요)",
+                     expanded=False):
+
+        st.markdown(
+            "### 한 줄로 말하면\n"
+            "**AI 데이터센터를 짓는 돈이 얼마나 위태로운 방식으로 조달되고 있는지**를 "
+            "0~100 숫자 하나로 나타낸 것입니다.\n\n"
+            "> ⚠️ **이 탭의 점수만 방향이 반대입니다.**\n"
+            "> 대시보드의 다른 종합점수는 *높을수록 좋다*(주식에 우호적)는 뜻이지만, "
+            "여기는 **높을수록 위험**하다는 뜻입니다. 두 점수는 서로 아무 영향도 주지 않습니다."
+        )
+
+        # ---------- 지금 상황 (실제 값으로) ----------
+        _asofs = [r["asof"] for r in ai_results if r["asof"] is not None]
+        _asof_txt = max(_asofs).strftime("%Y년 %m월 %d일") if _asofs else "-"
+        st.markdown(f"### 지금 상황 ({_asof_txt} 기준)")
+
+        # 각 지표가 자동점수 63.0 중 몇 점을 만들었는지 (기여도)
+        _den = sum(r["weight"] for r in ai_results if r["final"] is not None)
+        _contrib = []
+        for r in ai_results:
+            if r["final"] is None or _den == 0:
+                continue
+            _contrib.append({
+                "지표": r["name"],
+                "위험점수": r["final"],
+                "가중치": r["weight"],
+                "이 점수에 기여": round(r["weight"] * r["final"] / _den * 20, 1),
+            })
+        _contrib = sorted(_contrib, key=lambda x: -x["이 점수에 기여"])
+
+        cc1, cc2 = st.columns([3, 2])
+        with cc1:
+            st.markdown(
+                f"- 지금 위험지수는 **{ai_index if ai_index is not None else '-'}점**, "
+                f"구간으로는 **「{ai_label}」** 입니다.\n"
+                f"- 자동으로 받아온 지표에서 **{ai_auto}점**, "
+                f"체크리스트에서 **+{ai_points}점**이 나왔습니다.\n"
+                f"- 아래 표는 **어느 지표가 이 점수를 만들었는지**를 큰 순서대로 보여줍니다. "
+                f"맨 위 두세 개가 지금의 주된 걱정거리입니다."
+            )
+        with cc2:
+            if _contrib:
+                _top = _contrib[0]
+                st.metric("가장 크게 기여한 지표",
+                          _top["지표"][:18],
+                          f"{_top['이 점수에 기여']}점",
+                          delta_color="off")
+
+        if _contrib:
+            st.dataframe(pd.DataFrame(_contrib), use_container_width=True,
+                         hide_index=True)
+
+        # ---------- 계산 방법 ----------
+        st.markdown(
+            "### 점수는 이렇게 만들어집니다\n"
+            "복잡해 보이지만 **네 단계**뿐입니다.\n\n"
+            "**1단계 — 지표마다 「수준」 점수를 매깁니다 (1점에서 5점)**  \n"
+            "지금 값이 어느 구간에 들어가는지만 봅니다. 예를 들어 하이일드 금리차가 "
+            "3.0%p 아래면 5점(가장 위험), 3.8%p에서 5.5%p 사이면 1점(정상)입니다. "
+            "구간 숫자는 `config.py` 에 적혀 있고 바꿀 수 있습니다.\n\n"
+            "**2단계 — 지표마다 「추세」 점수를 매깁니다 (1점에서 5점)**  \n"
+            "**최근 3개월 동안 위험한 쪽으로 움직였는지**를 봅니다. "
+            "위험한 쪽으로 크게 움직였으면 5점, 제자리면 3점, 안전한 쪽으로 크게 "
+            "움직였으면 1점입니다.\n\n"
+            # 주의: Streamlit 마크다운은 한 문단에 물결표(~)가 짝수 개면 취소선
+            # 기호로 보고 지워버린다(1~5점 → 15점). 그래서 말로 풀어 쓴다.
+            "**3단계 — 두 점수를 반씩 섞고, 가중평균을 냅니다**  \n"
+            "`지표 점수 = 반올림(수준 × 0.5 + 추세 × 0.5)` 로 지표마다 1점에서 5점 "
+            "사이의 값을 만든 뒤, 중요도(가중치)를 곱해 평균 내고 20을 곱해 "
+            "0점에서 100점 사이로 폅니다. 그게 위에 있는 **자동지표 점수**입니다.\n\n"
+            "**4단계 — 체크리스트 가점을 더합니다**  \n"
+            "숫자로 안 잡히는 구조적 사건이 확인되면 그만큼 더합니다. "
+            "**빼지는 않고, 100을 넘지도 않습니다.**"
+        )
+
+        st.info(
+            "**왜 수준과 추세를 나누나요?**  \n"
+            "값이 나쁜 것과, 나빠지고 있는 것은 다른 이야기이기 때문입니다. "
+            "이미 위험한 수준인데 안정돼 있는 상태와, 아직 괜찮은데 빠르게 나빠지는 "
+            "상태를 구별하려는 것입니다. 조기경보는 후자를 놓치면 안 됩니다."
+        )
+
+        # ---------- 핵심 직관 ----------
+        st.markdown(
+            "### 가장 헷갈리는 부분 — 금리차는 **좁을수록 위험**합니다\n"
+            "상식과 반대라서 이 부분만 따로 설명드립니다.\n\n"
+            "**금리차(스프레드)가 뭔가요?** 위험한 회사에 돈을 빌려줄 때, 안전한 "
+            "미국 국채보다 **얼마나 더 높은 이자를 요구하는지**입니다. "
+            "위험이 클수록 더 많은 보상을 요구하는 게 정상입니다."
+        )
+
+        st.markdown(
+            "| 금리차 상태 | 시장이 하는 말 | 위험점수 | 왜 |\n"
+            "|---|---|:---:|---|\n"
+            "| 매우 좁다 (예: 하이일드 3%p 미만) | \"AI 관련이면 뭐든 안전하죠\" | **5점** | "
+            "위험을 값에 안 넣고 있습니다. 이때 돈이 가장 헤프게 풀리고, "
+            "나중에 터질 물량이 이 시기에 발행됩니다 |\n"
+            "| 적당하다 (3.8~5.5%p) | \"위험한 만큼 더 받겠습니다\" | **1점** | "
+            "가장 건강한 상태입니다 |\n"
+            "| 매우 넓다 (8%p 이상) | \"못 믿겠으니 안 빌려줍니다\" | **5점** | "
+            "이미 사고가 난 상태입니다. 기존 채권 만기가 돌아와도 새로 못 빌립니다 |\n"
+        )
+
+        st.warning(
+            "**그래서 지금 63점이 뜻하는 것은 \"이미 터졌다\"가 아닙니다.**  \n"
+            "반대로 **너무 조용해서 위험**하다는 쪽에 가깝습니다. "
+            "금리차가 역사적 최저권이라 돈이 매우 싸게 풀리고 있고, 그 사이 "
+            "CCC(최하위 등급)와 BBB의 격차만 벌어지고 있습니다. "
+            "겉은 멀쩡한데 바닥부터 갈라지는 모습입니다. "
+            "2007년 상반기가 이런 모양이었습니다."
+        )
+
+        # ---------- 구간별 행동 ----------
+        st.markdown("### 점수 구간별로 무엇을 하면 되나요")
+        st.markdown(
+            "| 점수 | 구간 | 이럴 때 하면 좋은 일 |\n"
+            "|:---:|---|---|\n"
+            "| 0~25 | 낮음 | 특별히 할 일 없습니다. 분기에 한 번 열어보면 충분합니다 |\n"
+            "| 25~45 | 보통 | 그대로 두되, 체크리스트에 새 소식이 있는지만 봅니다 |\n"
+            "| 45~65 | **경계** | AI·반도체·전력 관련 보유 비중을 세어 봅니다. "
+            "**한 테마에 몰려 있지 않은지**가 핵심입니다 |\n"
+            "| 65~85 | 높음 | 관련 종목 비중을 실제로 줄이거나, 만기가 긴 채권형 자산을 "
+            "점검합니다 |\n"
+            "| 85~100 | 매우 높음 | AI 인프라 관련 노출을 적극적으로 줄일 국면입니다 |\n"
+        )
+
+        st.markdown(
+            "특히 **체크리스트의 맨 위 두 항목(재유동화 상품, CDS 지수)** 은 "
+            "숫자보다 훨씬 중요합니다. 이 둘이 등장하면 손실이 한 곳에 머물지 않고 "
+            "여러 금융기관으로 복제되기 시작합니다. 2008년을 키운 것이 정확히 이 구조였습니다. "
+            "뉴스에서 보시면 바로 체크해 두세요."
+        )
+
+        # ---------- 한계 ----------
+        st.markdown("### 이 점수가 못 보는 것 (중요)")
+        st.markdown(
+            "- **발행량과 계약조건이 빠져 있습니다.** 데이터센터 유동화가 실제로 얼마나 "
+            "발행됐는지, 계약이 몇 년짜리인지 같은 원자료는 유료(KBRA·Finsight)라 "
+            "넣지 못했습니다. 그래서 **시장에서 먼저 움직이는 다른 지표로 대신** 봅니다.\n"
+            "- **대리지표는 상관관계일 뿐 인과가 아닙니다.** 데이터센터 REIT 주가가 "
+            "떨어졌다고 해서 반드시 채권이 부실해지는 것은 아닙니다. 다만 "
+            "**주가가 채권시장보다 먼저 움직이는 경향**이 있어 조기경보로 쓸 만합니다. "
+            "2007년에도 서브프라임 대출기관 주가가 채권지수보다 먼저 무너졌습니다.\n"
+            "- **가격 지표는 6개월 수익률로 봅니다.** 그래서 최근 흐름(모멘텀)에 "
+            "민감하고, 짧은 급락·급등에는 반응이 한 박자 느릴 수 있습니다.\n"
+            "- **체크리스트는 직접 켜야 작동합니다.** 자동으로 감지하지 못합니다. "
+            "관련 기사를 보시면 그때 체크하고 근거를 적어 두세요.\n"
+            "- **이건 예측이 아니라 온도계입니다.** 언제 터질지는 말해주지 않고, "
+            "지금 얼마나 뜨거운지만 알려줍니다."
+        )
+
+    st.caption(
+        "⚠️ 이 지수는 공개된 대리지표를 기계적으로 계산한 참고 자료입니다. "
+        "데이터센터 유동화 발행액·계약조건 원자료는 유료(KBRA·Finsight 등)라 "
+        "포함되어 있지 않으며, 투자 판단과 책임은 이용자에게 있습니다."
+    )
+
 
 with tab_journal:
     st.subheader("📝 매매일지")
