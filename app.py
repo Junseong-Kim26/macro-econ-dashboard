@@ -1863,7 +1863,7 @@ with tab_journal:
 
         # ---- 오른쪽: 자산 운용내역 ----
         with right:
-            st.markdown("##### 💰 자산 운용내역 (백만원)")
+            st.markdown("##### 💰 자산 운용내역 (천원)")
             today_pf = journal.snapshot(pdf, date_str)
             if today_pf.empty:
                 # 그날 내역이 없으면 직전 보유내역을 그대로 이어받아 표시
@@ -1888,16 +1888,17 @@ with tab_journal:
                 column_config={
                     "종목명": st.column_config.TextColumn("종목명", width="medium"),
                     "금액": st.column_config.NumberColumn(
-                        "금액(백만원)", min_value=0.0, step=0.1, format="%.1f",
-                        help="백만원 단위, 소수 첫째자리까지 입력 (예: 120.5)"),
+                        "금액(천원)", min_value=0.0, step=100.0, format="%.0f",
+                        help="천원 단위로 입력하세요. 예) 1억원 = 100000"),
                 },
             )
             # 편집 결과를 세션에 되돌려 저장 → 다음 재실행 때 그대로 이어짐
             st.session_state[pf_state_key] = edited_pf
 
             _tot = pd.to_numeric(edited_pf["금액"], errors="coerce").fillna(0).sum()
-            st.metric("합계", f"{_tot:,.1f} 백만원")
-            st.caption("종목명만 입력해도 저장됩니다 (금액은 나중에 채워도 됩니다).")
+            st.metric("합계", f"{_tot:,.0f} 천원  ({_tot/100000:,.2f}억원)")
+            st.caption("종목명만 입력해도 저장됩니다. 금액은 **천원 단위** — "
+                       "1억원이면 100000, 1천만원이면 10000 으로 적으세요.")
 
         # ---- 저장 (일지 + 자산내역 함께) ----
         if st.button("💾 저장", type="primary"):
@@ -1945,9 +1946,9 @@ with tab_journal:
             merged = pd.merge(lines, totals, on="날짜", how="outer")
             merged["핵심내용"] = merged["핵심내용"].fillna("(일지 없음)")
             merged = merged.sort_values("날짜", ascending=False).reset_index(drop=True)
-            merged["총자산(백만원)"] = merged["총자산"].map(
-                lambda v: "-" if pd.isna(v) else f"{v:,.1f}")
-            st.dataframe(merged[["날짜", "핵심내용", "총자산(백만원)"]],
+            merged["총자산(천원)"] = merged["총자산"].map(
+                lambda v: "-" if pd.isna(v) else f"{v:,.0f}")
+            st.dataframe(merged[["날짜", "핵심내용", "총자산(천원)"]],
                          use_container_width=True, hide_index=True, height=280)
 
             # 총자산 추이
@@ -1958,7 +1959,7 @@ with tab_journal:
                     x=pd.to_datetime(tchart["날짜"]), y=tchart["총자산"],
                     mode="lines+markers", name="총자산",
                     line=dict(width=2, color="#2ca02c")))
-                figa.update_layout(title="총자산 추이 (백만원)", height=280,
+                figa.update_layout(title="총자산 추이 (천원)", height=280,
                                    margin=dict(l=40, r=20, t=40, b=20),
                                    hovermode="x unified")
                 st.plotly_chart(figa, use_container_width=True)
@@ -1986,7 +1987,7 @@ with tab_journal:
                 figb.update_layout(
                     height=340, margin=dict(l=40, r=20, t=20, b=20),
                     hovermode="x unified",
-                    yaxis_title="금액 (백만원)",
+                    yaxis_title="금액 (천원)",
                     legend=dict(orientation="h", yanchor="bottom",
                                 y=1.02, xanchor="left", x=0),
                 )
@@ -1998,15 +1999,15 @@ with tab_journal:
             st.markdown("##### 전체 내용 보기")
             for _, row in merged.iterrows():
                 d = row["날짜"]
-                tot = "" if pd.isna(row["총자산"]) else f"  ·  총자산 {row['총자산']:,.1f}백만"
+                tot = "" if pd.isna(row["총자산"]) else f"  ·  총자산 {row['총자산']:,.0f}천원"
                 with st.expander(f"{d} — {row['핵심내용']}{tot}"):
                     jrow = jdf[jdf["날짜"] == d]
                     body = jrow["내용"].iloc[0] if len(jrow) else ""
                     st.write(body if str(body).strip() else "(일지 내용 없음)")
                     day_pf, is_own = journal.effective_snapshot(pdf, d)
                     if not day_pf.empty:
-                        st.caption("보유내역 (백만원)" if is_own
-                                   else "보유내역 (백만원) — 직전 기록 유지")
+                        st.caption("보유내역 (천원)" if is_own
+                                   else "보유내역 (천원) — 직전 기록 유지")
                         st.dataframe(comma(day_pf), use_container_width=True, hide_index=True)
 
             c1, c2 = st.columns(2)

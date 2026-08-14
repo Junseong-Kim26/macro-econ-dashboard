@@ -21,7 +21,7 @@ COLUMNS = ["날짜", "요약", "내용"]
 DEFAULT_PATH = "/apps/macro_dashboard/trade_journal.csv"
 SUMMARY_MAX = 60  # 자동 요약 시 자를 길이
 
-# 자산 운용내역: 날짜별 종목 평가액(백만원)
+# 자산 운용내역: 날짜별 종목 평가액(천원)
 PF_COLUMNS = ["날짜", "종목명", "금액"]
 DEFAULT_PF_PATH = "/apps/macro_dashboard/portfolio.csv"
 
@@ -148,7 +148,7 @@ def one_line(summary, body):
 
 
 # ---------------------------------------------------------------------------
-# 자산 운용내역 (날짜 · 종목명 · 금액[백만원])
+# 자산 운용내역 (날짜 · 종목명 · 금액[천원])
 # ---------------------------------------------------------------------------
 def empty_pf():
     return pd.DataFrame(columns=PF_COLUMNS)
@@ -280,7 +280,7 @@ def by_ticker(pdf):
 
 
 def daily_totals(pdf):
-    """날짜별 총자산(백만원) 합계."""
+    """날짜별 총자산(천원) 합계."""
     if pdf.empty:
         return pd.DataFrame(columns=["날짜", "총자산"])
     g = pdf.groupby("날짜", as_index=False)["금액"].sum()
