@@ -209,6 +209,91 @@ def upsert_portfolio(pdf, date_str, rows):
     return out.sort_values(["날짜", "종목명"], ascending=[False, True]).reset_index(drop=True)
 
 
+def portfolio_template(pdf, date_str):
+    """업로드용 양식(날짜·종목명·금액). 직전 보유내역을 날짜만 바꿔 채워 준다.
+
+    빈 칸에서 시작하는 것보다 직전 내역을 고쳐 쓰는 편이 훨씬 빠르기 때문이다.
+    """
+    base = effective_snapshot(pdf, date_str)[0]
+    if base is None or base.empty:
+        base = pd.DataFrame({"종목명": ["예) 삼성전자", "예) 미국달러"],
+                             "금액": [0.0, 0.0]})
+    out = base.copy()
+    out.insert(0, "날짜", date_str)
+    return out[PF_COLUMNS].reset_index(drop=True)
+
+
+def parse_portfolio_upload(data, filename=""):
+    """업로드한 자산내역 파일을 검증해 (DataFrame, 오류메시지) 로 돌려준다.
+
+    필요한 컬럼은 내려받은 파일과 같다: 날짜 · 종목명 · 금액(천원)
+    성공하면 오류메시지가 None 이고, 실패하면 DataFrame 이 None 이다.
+    """
+    name = (filename or "").lower()
+    raw = data.read() if hasattr(data, "read") else data
+
+    try:
+        if name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(io.BytesIO(raw))
+        else:
+            df = None
+            for enc in ("utf-8-sig", "utf-8", "cp949"):
+                try:
+                    df = pd.read_csv(io.BytesIO(raw), encoding=enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if df is None:
+                return None, ("파일 글자코드를 읽지 못했습니다. "
+                              "CSV는 UTF-8로 저장하거나 엑셀(.xlsx)로 올려 주세요.")
+    except Exception as e:  # noqa: BLE001
+        return None, f"파일을 읽지 못했습니다: {e}"
+
+    df = df.rename(columns=lambda c: str(c).strip())
+    missing = [c for c in PF_COLUMNS if c not in df.columns]
+    if missing:
+        return None, (f"필요한 열이 없습니다: {', '.join(missing)}  "
+                      f"(열 이름은 {' · '.join(PF_COLUMNS)} 이어야 합니다)")
+
+    df = df[PF_COLUMNS].copy()
+
+    # 날짜: 2026-08-18 · 2026/8/18 · 엑셀 날짜셀 모두 허용 → YYYY-MM-DD 로 통일
+    parsed = pd.to_datetime(df["날짜"], errors="coerce")
+    bad_date = int(parsed.isna().sum())
+    df["날짜"] = parsed.dt.strftime("%Y-%m-%d")
+
+    df["종목명"] = df["종목명"].fillna("").astype(str).str.strip()
+    # 금액에 콤마가 섞여 있어도 읽히도록
+    df["금액"] = pd.to_numeric(
+        df["금액"].astype(str).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce")
+    bad_amt = int(df["금액"].isna().sum())
+    df["금액"] = df["금액"].fillna(0.0)
+
+    df = df[(df["날짜"].notna()) & (df["종목명"] != "")].reset_index(drop=True)
+    if df.empty:
+        return None, "쓸 수 있는 행이 없습니다. 날짜와 종목명이 채워져 있는지 확인해 주세요."
+
+    notes = []
+    if bad_date:
+        notes.append(f"날짜를 읽지 못한 {bad_date}행은 제외했습니다")
+    if bad_amt:
+        notes.append(f"금액이 숫자가 아닌 {bad_amt}행은 0으로 처리했습니다")
+    return df, ("· ".join(notes) if notes else None)
+
+
+def merge_portfolio(pdf, updf):
+    """업로드 자료를 기존 자산내역에 반영. **파일에 있는 날짜만** 통째로 교체한다.
+
+    파일에 없는 날짜의 기존 기록은 건드리지 않는다(실수로 과거 기록이 날아가는 것 방지).
+    """
+    out = pdf.copy()
+    for d in sorted(updf["날짜"].unique()):
+        rows = updf[updf["날짜"] == d][["종목명", "금액"]]
+        out = upsert_portfolio(out, d, rows)
+    return out
+
+
 def snapshot(pdf, date_str):
     """특정 날짜의 보유내역(종목명·금액)."""
     rows = pdf[pdf["날짜"] == date_str]

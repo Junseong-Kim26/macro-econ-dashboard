@@ -66,7 +66,9 @@ def fetch_ecos(ecos_info, api_key, start=config.DATA_START):
         f"https://ecos.bok.or.kr/api/StatisticSearch/{api_key}/json/kr/"
         f"1/100000/{stat}/{cycle}/{s_date}/{e_date}/{item}"
     )
-    r = requests.get(url, timeout=30)
+    # 연결 5초 / 응답 30초. 해외 클라우드에서 ECOS 가 막혀 있을 때
+    # 30초씩 매달리지 않고 빨리 실패시켜 보관본으로 넘어가게 한다.
+    r = requests.get(url, timeout=(5, 30))
     r.raise_for_status()
     payload = r.json()
 
@@ -90,6 +92,45 @@ def fetch_ecos(ecos_info, api_key, start=config.DATA_START):
     s = df.set_index("date")["value"].dropna().sort_index()
     s.name = stat + "_" + item
     return s
+
+
+# ---------------------------------------------------------------------------
+# Dropbox 보관본 — 해외 클라우드에서 국내 API(ECOS)가 막힐 때 대비
+# ---------------------------------------------------------------------------
+# 한국은행 ECOS 는 Streamlit Cloud(해외 IP)에서 접속이 막힌다(연결 타임아웃).
+# DART 와 같은 문제라, 같은 해법을 쓴다:
+#   · 로컬 PC에서 조회에 성공하면 그 결과를 Dropbox에 보관해 두고
+#   · 클라우드에서는 조회 실패 시 그 보관본을 읽어 화면을 채운다.
+# 따라서 한국 금리는 "로컬에서 앱을 마지막으로 켠 날짜" 기준으로 표시된다.
+def _mirror_name(key):
+    return f"series_{key}"
+
+
+def mirror_save(key, s):
+    """시리즈를 Dropbox에 보관한다. 실패해도 본래 흐름을 막지 않는다."""
+    try:
+        import journal
+
+        df = pd.DataFrame({"날짜": pd.to_datetime(s.index).strftime("%Y-%m-%d"),
+                           "값": pd.to_numeric(s.values, errors="coerce")})
+        journal.save_table(df, _mirror_name(key))
+    except Exception:  # noqa: BLE001  (보관 실패는 조용히 넘어간다)
+        pass
+
+
+def mirror_load(key):
+    """Dropbox 보관본을 Series로 읽는다. 없으면 None."""
+    try:
+        import journal
+
+        df = journal.load_table(_mirror_name(key))
+        if df is None or df.empty or "값" not in df.columns:
+            return None
+        s = pd.Series(pd.to_numeric(df["값"], errors="coerce").values,
+                      index=pd.to_datetime(df["날짜"]), name=key).dropna().sort_index()
+        return s if not s.empty else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +178,9 @@ def fetch_variable(var, keys, use_cache=True, max_age_hours=12):
         s.name = var["key"]
         # 캐시 저장
         s.to_frame("value").to_parquet(path)
+        # 국내 API(ECOS)는 해외 클라우드에서 막히므로, 성공한 결과를 Dropbox에 보관
+        if var["source"] == "ecos":
+            mirror_save(var["key"], s)
         return s, None
     except Exception as e:  # noqa: BLE001
         # 3) 조회 실패 → 오래된 캐시라도 있으면 사용
@@ -144,6 +188,13 @@ def fetch_variable(var, keys, use_cache=True, max_age_hours=12):
             s = pd.read_parquet(path)["value"]
             s.name = var["key"]
             return s, f"{var['name']}: 최신 조회 실패, 캐시 사용 ({e})"
+        # 4) 로컬 캐시도 없으면(클라우드 첫 실행) Dropbox 보관본으로 대체
+        m = mirror_load(var["key"])
+        if m is not None:
+            m = m.rename(var["key"])
+            last = m.index.max().strftime("%Y-%m-%d")
+            return m, (f"{var['name']}: 원본 조회 실패 → Dropbox 보관본 사용 "
+                       f"(자료 최종일 {last})")
         return pd.Series(dtype="float64", name=var["key"]), f"{var['name']}: {e}"
 
 

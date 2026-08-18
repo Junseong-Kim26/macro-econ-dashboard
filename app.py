@@ -221,7 +221,11 @@ if not keys["fred"]:
 
 frame, errors = load_frame(keys, use_cache=USE_CACHE)
 for e in errors:
-    st.sidebar.error(e)
+    # 대체 자료로 화면이 정상적으로 채워진 경우는 '경고'가 아니라 '안내'로 표시
+    if ("보관본 사용" in e) or ("캐시 사용" in e):
+        st.sidebar.info(e)
+    else:
+        st.sidebar.error(e)
 
 if frame.empty:
     st.error("데이터를 불러오지 못했습니다. API 키와 네트워크를 확인하세요.")
@@ -2313,6 +2317,67 @@ with tab_journal:
                     st.rerun()
                 else:
                     st.error(" / ".join(msgs))
+
+        # 업로드 결과는 st.rerun() 이 그 자리 메시지를 지우므로 세션에 담아 두었다가 표시
+        if st.session_state.get("pf_upload_msg"):
+            st.success(st.session_state.pop("pf_upload_msg"))
+
+        # ---- 자산내역 파일로 올리기 (양식 내려받기 → 작성 → 업로드) ----
+        with st.expander("⬆️ 자산 운용내역 파일로 올리기 (여러 날짜 한 번에)"):
+            st.markdown(
+                """
+① 아래 **양식 내려받기** 로 파일을 받고
+
+② 엑셀에서 날짜 · 종목명 · 금액을 채운 뒤
+
+③ **파일 선택** 으로 올리고 **반영하기** 를 누르세요.
+"""
+            )
+            st.caption(
+                f"열 이름은 **{' · '.join(journal.PF_COLUMNS)}** 세 개여야 합니다. "
+                "날짜는 2026-08-18 처럼 적고, 금액은 **천원 단위** 숫자입니다(콤마 있어도 됩니다). "
+                "파일에 들어 있는 날짜만 새 내용으로 바뀌고, 파일에 없는 날짜의 기존 기록은 그대로 남습니다. "
+                "여러 날짜를 한 파일에 이어서 적어도 됩니다."
+            )
+
+            tpl = journal.portfolio_template(pdf, date_str)
+            st.download_button(
+                "⬇️ 양식 내려받기 (CSV)",
+                tpl.to_csv(index=False).encode("utf-8-sig"),
+                f"자산운용내역_양식_{who}_{date_str}.csv", "text/csv",
+                key="pf_tpl_dl",
+            )
+            st.caption("양식 미리보기 — 위에서 고른 날짜의 보유내역이 채워져 있습니다.")
+            st.dataframe(tpl, use_container_width=True, hide_index=True)
+
+            up = st.file_uploader("파일 선택 (CSV 또는 엑셀)",
+                                  type=["csv", "xlsx", "xls"],
+                                  key=f"pf_upload_{who}")
+            if up is not None:
+                updf, note = journal.parse_portfolio_upload(up.getvalue(), up.name)
+                if updf is None:
+                    st.error(note)
+                else:
+                    if note:
+                        st.warning(note)
+                    summ = (updf.groupby("날짜")
+                            .agg(종목수=("종목명", "count"), 합계=("금액", "sum"))
+                            .reset_index().sort_values("날짜", ascending=False))
+                    summ["합계(천원)"] = summ["합계"].map(lambda v: f"{v:,.0f}")
+                    st.info(f"{len(updf)}행 · {len(summ)}개 날짜를 읽었습니다. "
+                            "아래 날짜의 기존 내역을 이 내용으로 바꿉니다.")
+                    st.dataframe(summ[["날짜", "종목수", "합계(천원)"]],
+                                 use_container_width=True, hide_index=True)
+                    if st.button("✅ 반영하기", type="primary", key="pf_upload_apply"):
+                        merged = journal.merge_portfolio(pdf, updf)
+                        ok, err = journal.save_portfolio(merged, who)
+                        if ok:
+                            st.session_state.pop(pf_state_key, None)
+                            st.session_state["pf_upload_msg"] = (
+                                f"자산내역을 반영했습니다 — {len(summ)}개 날짜 · {len(updf)}행")
+                            st.rerun()
+                        else:
+                            st.error(err)
 
         st.divider()
 
