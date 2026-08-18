@@ -63,4 +63,4 @@ back, err7 = journal.parse_portfolio_upload(
     tpl.to_csv(index=False).encode("utf-8-sig"), "tpl.csv")
 t("양식 왕복 파싱", back is not None and err7 is None and len(back) == 2)
 
-print("\n7개 항목 모두 통과")
+print("\n11개 항목 모두 통과")
