@@ -121,6 +121,71 @@ def fmt(value, decimals, unit):
     return f"{value:,.{decimals}f}{unit}"
 
 
+def sparkline_svg(values, color, height=32):
+    """작은 추세선(스파크라인)을 SVG 문자열로 만든다.
+
+    카드가 10개라 plotly 를 10번 그리면 화면이 느려진다. 선 하나뿐이라
+    좌표만 계산해 SVG 로 직접 그린다(외부 요청도, 렌더 비용도 없다).
+    가로는 100% 로 늘어나므로 viewBox 는 임의 폭 100 을 기준으로 잡는다.
+    """
+    vals = [float(v) for v in values if v is not None and not pd.isna(v)]
+    if len(vals) < 2:
+        return ""
+
+    W, PAD = 100.0, 3.0
+    lo, hi = min(vals), max(vals)
+    span = (hi - lo) or 1.0          # 평평한 구간이면 0 나눗셈이 나므로 1로
+    n = len(vals)
+
+    pts = []
+    for i, v in enumerate(vals):
+        x = PAD + i * (W - 2 * PAD) / (n - 1)
+        y = height - PAD - (v - lo) / span * (height - 2 * PAD)
+        pts.append(f"{x:.2f},{y:.2f}")
+    lx, ly = pts[-1].split(",")
+
+    return (
+        f"<svg viewBox='0 0 {W:.0f} {height}' preserveAspectRatio='none' "
+        f"style='width:100%;height:{height}px;display:block;margin:6px 0 2px;'>"
+        f"<polyline points='{' '.join(pts)}' fill='none' stroke='{color}' "
+        f"stroke-width='1.6' vector-effect='non-scaling-stroke' "
+        f"stroke-linejoin='round' stroke-linecap='round'/>"
+        f"<circle cx='{lx}' cy='{ly}' r='2.2' fill='{color}' "
+        f"vector-effect='non-scaling-stroke'/>"
+        f"</svg>"
+    )
+
+
+def trend_delta_text(r):
+    """3개월 전 대비 변화량을 방향 화살표와 함께 문자열로 만든다.
+
+    반환: (표시문자열, 색상). 판단할 수 없으면 ("", "").
+    금리·물가류는 %p, 유가처럼 비율로 보는 것은 % 로 적는다.
+    """
+    cur, past = r["current"], r["past"]
+    if cur is None or past is None or pd.isna(cur) or pd.isna(past):
+        return "", ""
+
+    cfg = config.TREND_THRESHOLDS[r["trend_type"]]
+    if cfg["mode"] == "pct":
+        if past == 0:
+            return "", ""
+        change = (cur / past - 1.0) * 100.0
+        text = f"{change:+.1f}%"
+        flat = cfg["flat"] * 100.0
+    else:
+        change = cur - past
+        suffix = "%p" if r["unit"] == "%" else r["unit"]
+        text = f"{change:+,.{r['decimals']}f}{suffix}"
+        flat = cfg["flat"]
+
+    # 방향 화살표. flat 이하면 사실상 제자리이므로 가로 화살표.
+    arrow = "→" if abs(change) <= flat else ("▲" if change > 0 else "▼")
+    # 모든 변수가 '내려갈수록 우호' 로 통일돼 있으므로, 하락이 초록이다.
+    color = "#5A6472" if arrow == "→" else ("#d73027" if change > 0 else "#1a9850")
+    return f"{arrow} {text}", color
+
+
 def save_dart_cache(cmap, fin, year, rcode):
     """DART 재무·기업코드를 Dropbox에 보관 (분기마다 한 번만 갱신하면 됨).
 
@@ -349,8 +414,15 @@ with st.expander("📖 종합점수 구간별 설명 (전체 보기)", expanded=
 # 변수별 점수 카드
 # ---------------------------------------------------------------------------
 st.subheader("변수별 점수")
-st.caption("왼쪽 색 띠와 점수 배지는 종합점수 게이지와 같은 색 체계입니다 — 빨강일수록 비우호, 초록일수록 우호.")
+st.caption(
+    "왼쪽 색 띠와 점수 배지는 종합점수 게이지와 같은 색 체계입니다 — 빨강일수록 비우호, 초록일수록 우호.  "
+    f"추세선과 화살표는 최근 {config.TREND_MONTHS}개월 흐름이며, "
+    "모든 변수는 **내려갈수록 우호**라 하락이 초록입니다."
+)
 PER_ROW = 5
+# 스파크라인에 쓸 구간 — 추세 점수와 같은 기간을 봐야 카드 안에서 말이 맞는다
+spark_from = frame.index[-1] - pd.DateOffset(months=config.TREND_MONTHS)
+
 for start in range(0, len(results), PER_ROW):
     row = results[start:start + PER_ROW]
     cols = st.columns(PER_ROW)
@@ -359,6 +431,9 @@ for start in range(0, len(results), PER_ROW):
             cur = fmt(r["current"], r["decimals"], r["unit"])
             final = r["final"] if r["final"] is not None else "-"
             c = scoring.score_color(r["final"])
+            delta_txt, delta_color = trend_delta_text(r)
+            spark = sparkline_svg(
+                frame.loc[frame.index >= spark_from, r["key"]].dropna(), c)
             # 색은 띠와 배지 배경에만 쓰고 글자는 늘 진하게 둔다.
             # 3점 노랑(#fee08b)을 글자색으로 쓰면 흰 바탕에서 안 보이기 때문.
             st.markdown(
@@ -369,8 +444,12 @@ for start in range(0, len(results), PER_ROW):
                 f"<span style='display:inline-block;background:{c}33;color:#16202B;"
                 f"font-weight:700;font-size:0.82em;padding:1px 8px;border-radius:10px;'>"
                 f"{final} / 5 점</span>"
-                f"<div style='font-size:0.74em;color:#5A6472;margin-top:5px;'>"
-                f"수준 {r['level']} · 추세 {r['trend']} · 가중치 {r['weight']}</div>"
+                f"<span style='font-size:0.82em;font-weight:700;color:{delta_color};"
+                f"margin-left:6px;'>{delta_txt}</span>"
+                f"{spark}"
+                f"<div style='font-size:0.74em;color:#5A6472;margin-top:2px;'>"
+                f"수준 {r['level']} · 추세 {scoring.trend_label(r['trend'])}"
+                f" · 가중치 {r['weight']}</div>"
                 f"</div>",
                 unsafe_allow_html=True,
             )

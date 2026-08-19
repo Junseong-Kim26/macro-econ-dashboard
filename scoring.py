@@ -52,6 +52,19 @@ def trend_score(current, past, trend_type):
     return 1       # 크게 상승
 
 
+TREND_LABELS = {5: "크게 하락", 4: "소폭 하락", 3: "보합",
+                2: "소폭 상승", 1: "크게 상승"}
+
+
+def trend_label(score):
+    """추세 점수를 방향이 드러나는 말로 바꾼다.
+
+    점수만 보면 오르는 중인지 내리는 중인지 알 수 없어서 필요하다.
+    모든 변수를 '내려갈수록 우호' 로 통일했으므로 점수가 높을수록 하락이다.
+    """
+    return TREND_LABELS.get(score, "판단 불가")
+
+
 def _value_months_ago(series, months):
     """series(일별) 에서 마지막 날짜 기준 N개월 전 값을 asof로 조회."""
     s = series.dropna()
@@ -90,6 +103,8 @@ def score_variable(series, var):
         "key": var["key"],
         "name": var["name"],
         "unit": var["unit"],
+        # 화면에서 3개월 변화량을 %p 로 쓸지 % 로 쓸지 정하는 데 쓴다
+        "trend_type": var["trend_type"],
         "decimals": var["decimals"],
         "weight": var["weight"],
         "current": current,
