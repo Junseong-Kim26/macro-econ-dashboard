@@ -120,6 +120,18 @@ def score_all(frame, variables):
     return results, composite
 
 
+def score_color(final):
+    """변수 하나의 점수(1~5)를 종합점수와 같은 색 체계로 바꾼다.
+
+    새 색상표를 만들지 않고 config.SCORE_INTERPRETATION 을 그대로 쓴다.
+    1점을 10, 2점을 30 … 5점을 90 으로 놓으면 각 구간 한가운데에 떨어진다.
+    덕분에 게이지·구간설명·변수카드의 색이 서로 어긋나지 않는다.
+    """
+    if final is None:
+        return "#888888"
+    return interpret(final * 20 - 10)[1]
+
+
 def interpret(composite):
     """종합점수 → (라벨, 색상, 설명)."""
     if composite is None:

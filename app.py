@@ -31,6 +31,51 @@ load_dotenv()
 
 st.set_page_config(page_title="거시경제 대시보드", page_icon="📊", layout="wide")
 
+# ---------------------------------------------------------------------------
+# 전역 스타일 — 탭 막대를 화면 상단에 고정
+# ---------------------------------------------------------------------------
+# 탭이 10개인데다 종합점수·변수카드 아래에 있어서, 한 탭 안에서 조금만 내려도
+# 탭 막대가 화면 밖으로 나가 버렸다. 다른 탭으로 가려면 매번 맨 위까지 올라와야 했다.
+#
+# 선택자 주의:
+#  · 인터넷 예제에 흔한 div[data-baseweb="tab-list"] 는 지금 Streamlit 에서 안 맞는다.
+#    실제 탭 막대는 div[data-testid="stTabs"] 안의 div[role="tablist"] 이다.
+#  · 자식 선택자(>)로 경로를 못박으면 안 된다. 래퍼 div 깊이가 Streamlit 버전마다
+#    달라서(로컬 1.51은 3단계, 배포본은 2단계) 한쪽에서 조용히 안 먹는다. 자손 선택자로 쓴다.
+#  · st.tabs 가 두 군데다(최상위, ROE·PBR 탭 안쪽 하위탭). 안쪽 것까지 붙으면
+#    같은 자리에 겹치므로, 두 번째 규칙으로 안쪽만 원위치시킨다.
+#    (선택자 명시도가 더 높아 안쪽에서는 두 번째 규칙이 이긴다)
+#  · top 값은 px 이 아니라 rem 이어야 한다. 헤더 높이(3.75rem)가 글자 크기에
+#    비례해 움직이므로, px 으로 박아 두면 config.toml 의 baseFontSize 를 바꿀 때 어긋난다.
+st.markdown("""
+<style>
+/* 탭 막대만 홀로 감싼 래퍼 div 는 상자 계산에서 빼 준다.
+   이 래퍼는 높이가 탭 막대와 똑같아서(46px), 그대로 두면 sticky 가 그 안에서만
+   움직일 수 있어 사실상 고정이 안 된다. display:contents 로 없애면 탭 막대의
+   기준이 탭 내용 전체를 담은 바깥 div 가 되어 제대로 붙는다.
+   :only-child 조건 덕에, 래퍼가 없는 구버전 구조에서는 이 규칙이 걸리지 않는다. */
+div[data-testid="stTabs"] div:has(> div[role="tablist"]:only-child) {
+    display: contents;
+}
+/* 최상위 탭 막대: 상단 헤더 바로 아래에 고정 */
+div[data-testid="stTabs"] div[role="tablist"] {
+    position: sticky;
+    top: 3.75rem;                       /* Streamlit 헤더 높이 */
+    z-index: 100;                       /* 헤더(999990)보다 낮게 → 헤더를 덮지 않음 */
+    background: #FFFFFF;                /* .streamlit/config.toml 의 backgroundColor 와 같은 값 */
+    border-bottom: 1px solid #D6DEE8;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+}
+/* 안쪽(중첩) 탭 막대는 고정하지 않는다 */
+div[data-testid="stTabs"] div[data-testid="stTabs"] div[role="tablist"] {
+    position: static;
+    background: transparent;
+    border-bottom: none;
+    box-shadow: none;
+}
+</style>
+""", unsafe_allow_html=True)
+
 
 class _SkipIndividual(Exception):
     """ROE 구간 평균 보기일 때 개별 종목 화면을 건너뛰기 위한 내부 신호."""
@@ -180,6 +225,12 @@ def _q_table(df, keep_quadrant=False):
 # ---------------------------------------------------------------------------
 # 사이드바
 # ---------------------------------------------------------------------------
+# 종합점수를 사이드바 맨 위에 두려고 자리만 먼저 잡아 둔다.
+# 점수는 한참 뒤(데이터 로드 후)에야 계산되는데, 그때 그냥 st.sidebar 를 쓰면
+# 새로고침 버튼 아래로 밀린다. 사이드바는 본문 스크롤과 무관해서,
+# 어느 탭에 가 있든 점수가 항상 보인다.
+score_slot = st.sidebar.container()
+
 st.sidebar.header("⚙️ 설정")
 keys = load_keys()
 
@@ -233,6 +284,16 @@ if frame.empty:
 
 results, composite = scoring.score_all(frame, config.VARIABLES)
 label, color, desc = scoring.interpret(composite)
+last_date = frame.dropna(how="all").index[-1].strftime("%Y-%m-%d")
+
+# 위에서 잡아 둔 사이드바 자리를 이제 채운다
+with score_slot:
+    st.metric("종합점수", f"{composite} 점" if composite is not None else "-",
+              label, delta_color="off")
+    st.markdown(f"<div style='height:6px;background:{color};border-radius:3px;'></div>",
+                unsafe_allow_html=True)
+    st.caption(f"기준일 {last_date}")
+    st.divider()
 
 # ---------------------------------------------------------------------------
 # 상단: 종합점수
@@ -263,7 +324,6 @@ with top_left:
 with top_right:
     st.markdown(f"### 종합점수: <span style='color:{color}'>{composite} 점 — {label}</span>",
                 unsafe_allow_html=True)
-    last_date = frame.dropna(how="all").index[-1].strftime("%Y-%m-%d")
     st.caption(f"기준일: {last_date}")
     # 현재 구간 설명 강조
     st.markdown(
@@ -289,6 +349,7 @@ with st.expander("📖 종합점수 구간별 설명 (전체 보기)", expanded=
 # 변수별 점수 카드
 # ---------------------------------------------------------------------------
 st.subheader("변수별 점수")
+st.caption("왼쪽 색 띠와 점수 배지는 종합점수 게이지와 같은 색 체계입니다 — 빨강일수록 비우호, 초록일수록 우호.")
 PER_ROW = 5
 for start in range(0, len(results), PER_ROW):
     row = results[start:start + PER_ROW]
@@ -297,8 +358,22 @@ for start in range(0, len(results), PER_ROW):
         with col:
             cur = fmt(r["current"], r["decimals"], r["unit"])
             final = r["final"] if r["final"] is not None else "-"
-            st.metric(label=r["name"], value=cur, delta=f"{final} / 5 점", delta_color="off")
-            st.caption(f"수준 {r['level']} · 추세 {r['trend']} · 가중치 {r['weight']}")
+            c = scoring.score_color(r["final"])
+            # 색은 띠와 배지 배경에만 쓰고 글자는 늘 진하게 둔다.
+            # 3점 노랑(#fee08b)을 글자색으로 쓰면 흰 바탕에서 안 보이기 때문.
+            st.markdown(
+                f"<div style='border-left:5px solid {c};background:{c}14;"
+                f"padding:8px 10px;border-radius:6px;margin-bottom:6px;'>"
+                f"<div style='font-size:0.82em;color:#5A6472;'>{r['name']}</div>"
+                f"<div style='font-size:1.6em;font-weight:700;line-height:1.25;'>{cur}</div>"
+                f"<span style='display:inline-block;background:{c}33;color:#16202B;"
+                f"font-weight:700;font-size:0.82em;padding:1px 8px;border-radius:10px;'>"
+                f"{final} / 5 점</span>"
+                f"<div style='font-size:0.74em;color:#5A6472;margin-top:5px;'>"
+                f"수준 {r['level']} · 추세 {r['trend']} · 가중치 {r['weight']}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
 # ---------------------------------------------------------------------------
 # 탭: 그래프 / 시장지수(콤보) / 테이블 / 점수 기준
