@@ -147,6 +147,86 @@ def score_color(final):
     return interpret(final * 20 - 10)[1]
 
 
+def _level_series(values, bands):
+    """level_score 의 시계열판. 구간마다 마스크로 한 번에 채운다."""
+    out = pd.Series(float("nan"), index=values.index)
+    for low, high, score in bands:
+        out[(values >= low) & (values < high)] = score
+    return out
+
+
+def _trend_series(values, past, trend_type):
+    """trend_score 의 시계열판. 경계 조건은 scalar 판과 똑같이 맞춘다.
+
+        change < -small          → 5 (크게 하락)
+        -small <= change < -flat → 4 (소폭 하락)
+        -flat  <= change <= flat → 3 (보합)
+        flat   <  change <= small→ 2 (소폭 상승)
+        change > small           → 1 (크게 상승)
+    """
+    cfg = config.TREND_THRESHOLDS[trend_type]
+    if cfg["mode"] == "pct":
+        change = values / past.replace(0, float("nan")) - 1.0
+    else:
+        change = values - past
+
+    flat, small = cfg["flat"], cfg["small"]
+    out = pd.Series(3.0, index=values.index)          # 기본은 보합
+    out[change < -small] = 5.0
+    out[(change >= -small) & (change < -flat)] = 4.0
+    out[(change > flat) & (change <= small)] = 2.0
+    out[change > small] = 1.0
+    out[change.isna()] = float("nan")
+    return out
+
+
+def score_history(frame, variables):
+    """날짜별 종합점수(0~100)를 시계열로 되돌려 계산한다.
+
+    화면의 게이지는 '오늘의 점수' 한 값뿐이라, 점수가 좋아지는 중인지
+    나빠지는 중인지 알 수 없다. 그래서 과거 각 날짜에 같은 방식으로
+    점수를 매겨 추세선을 그린다.
+
+    frame 은 이미 일별로 forward-fill 된 표이므로, 각 날짜의 값은
+    '그 날까지 알려진 마지막 값' 이다. score_variable 이 쓰는 asof 조회와
+    같은 뜻이라 오늘 값은 score_all 결과와 정확히 일치한다.
+
+    반환: (종합점수 Series, 그 날짜에 점수가 매겨진 변수 개수 Series)
+    """
+    if frame.empty:
+        empty = pd.Series(dtype="float64")
+        return empty, empty
+
+    past_idx = frame.index - pd.DateOffset(months=config.TREND_MONTHS)
+
+    num = pd.Series(0.0, index=frame.index)   # 가중치 × 점수 합
+    den = pd.Series(0.0, index=frame.index)   # 점수가 있는 변수의 가중치 합
+    cnt = pd.Series(0, index=frame.index)     # 점수가 매겨진 변수 개수
+
+    for var in variables:
+        key = var["key"]
+        if key not in frame.columns:
+            continue
+        cur = frame[key]
+        # 3개월 전 값 — 일별 연속 인덱스라 날짜를 그대로 당겨 오면 된다
+        past = pd.Series(cur.reindex(past_idx).values, index=frame.index)
+
+        lvl = _level_series(cur, var["level_bands"])
+        trd = _trend_series(cur, past, var["trend_type"])
+
+        # 둘 다 있으면 반반, 한쪽만 있으면 그 값 (score_variable 과 동일)
+        final = (0.5 * lvl + 0.5 * trd).round()
+        final = final.fillna(lvl).fillna(trd)
+
+        has = final.notna()
+        num += var["weight"] * final.fillna(0.0)
+        den += var["weight"] * has
+        cnt += has.astype(int)
+
+    composite = (num / den.replace(0, float("nan")) * 20).round(1)
+    return composite, cnt
+
+
 def interpret(composite):
     """종합점수 → (라벨, 색상, 설명)."""
     if composite is None:

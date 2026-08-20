@@ -398,6 +398,55 @@ with top_right:
     )
     st.caption("각 변수는 `절대수준 점수`와 `최근 3개월 추세 점수`를 반반 반영합니다.")
 
+# ---------------------------------------------------------------------------
+# 종합점수 추세선
+# ---------------------------------------------------------------------------
+# 게이지는 '오늘 몇 점' 만 알려줘서, 점수가 좋아지는 중인지 나빠지는 중인지
+# 알 수 없다. 과거 각 날짜에 같은 방식으로 점수를 매겨 흐름을 보여준다.
+score_hist, score_cnt = scoring.score_history(frame, config.VARIABLES)
+
+# 변수가 다 모이기 전 구간은 적은 변수로 낸 점수라 지금과 견줄 수 없다 → 뺀다
+if not score_hist.empty:
+    full = score_cnt[score_cnt == len(results)]
+    if not full.empty:
+        score_hist = score_hist[score_hist.index >= full.index.min()]
+    if period_days:
+        score_hist = score_hist[
+            score_hist.index >= pd.Timestamp.today().normalize()
+            - pd.Timedelta(days=period_days)]
+
+if len(score_hist.dropna()) >= 2:
+    figs = go.Figure()
+    # 구간 색을 배경에 깔아, 몇 점이 어느 국면인지 눈금 없이도 보이게 한다
+    for low, high, blabel, bcolor, _ in config.SCORE_INTERPRETATION:
+        figs.add_hrect(y0=low, y1=min(high, 100), line_width=0,
+                       fillcolor=bcolor, opacity=0.16, layer="below",
+                       annotation_text=blabel.split("(")[0].strip(),
+                       annotation_position="right",
+                       annotation_font_size=10,
+                       annotation_font_color="#5A6472")
+    figs.add_trace(go.Scatter(
+        x=score_hist.index, y=score_hist.values, mode="lines",
+        name="종합점수", line=dict(width=2, color="#16202B"),
+        hovertemplate="%{x|%Y-%m-%d}<br>종합점수 %{y:.1f} 점<extra></extra>"))
+    # 오늘 위치를 점으로 찍어 게이지 숫자와 눈으로 이어지게 한다
+    figs.add_trace(go.Scatter(
+        x=[score_hist.index[-1]], y=[score_hist.iloc[-1]], mode="markers",
+        name="현재", marker=dict(size=9, color=color,
+                               line=dict(width=1.5, color="#FFFFFF")),
+        hovertemplate="현재 %{y:.1f} 점<extra></extra>"))
+    figs.update_layout(
+        title=f"종합점수 추세 ({period})", height=260,
+        margin=dict(l=40, r=70, t=40, b=20),
+        yaxis=dict(range=[0, 100], dtick=20),
+        showlegend=False, hovermode="x unified",
+    )
+    st.plotly_chart(figs, use_container_width=True)
+    st.caption(
+        "과거 각 날짜에 오늘과 똑같은 방식(절대수준 + 최근 3개월 추세)으로 매긴 점수입니다. "
+        "월 단위로 발표되는 지표(CPI·PPI·실업률·연체율)는 발표일에 값이 계단처럼 바뀝니다."
+    )
+
 # 종합점수 구간별 설명 (전체)
 with st.expander("📖 종합점수 구간별 설명 (전체 보기)", expanded=False):
     for low, high, blabel, bcolor, bdesc in config.SCORE_INTERPRETATION:

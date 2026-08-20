@@ -63,6 +63,41 @@ def test_composite():
     print(f"[OK] composite = {comp} (기대 {round(expected,1)})")
 
 
+def test_history_matches_today():
+    """추세선의 마지막 값은 게이지에 뜨는 오늘 점수와 반드시 같아야 한다.
+
+    score_history 는 화면용으로 따로 짠 시계열 계산이라, 언젠가 점수 규칙을
+    고치면서 한쪽만 바꾸면 '게이지 62.6점인데 선은 58점' 같은 일이 생긴다.
+    그걸 막는 시금석이다.
+    """
+    idx = pd.date_range("2020-01-01", "2024-12-31", freq="D")
+    rng = pd.Series(range(len(idx)), index=idx, dtype="float64")
+    frame = pd.DataFrame({
+        # 실제와 비슷하게 오르내리는 값을 만들어 넣는다
+        "us10y": 3.0 + (rng % 400) / 400.0,
+        "wti":   70.0 + (rng % 250) / 5.0,
+        "vix":   15.0 + (rng % 120) / 12.0,
+    }, index=idx)
+    variables = [config.get_variable(k) for k in ("us10y", "wti", "vix")]
+
+    _, composite = scoring.score_all(frame, variables)
+    hist, cnt = scoring.score_history(frame, variables)
+
+    assert composite == hist.iloc[-1], f"게이지 {composite} != 추세선 {hist.iloc[-1]}"
+    assert int(cnt.iloc[-1]) == len(variables), "마지막 날 변수 개수가 안 맞음"
+    assert hist.dropna().between(0, 100).all(), "0~100 밖의 점수가 있음"
+    print(f"[OK] 추세선 마지막 값 = 오늘 점수 = {composite}")
+
+
+def test_trend_label():
+    """점수가 높을수록 하락(우호)이라는 방향 규칙."""
+    assert scoring.trend_label(5) == "크게 하락"
+    assert scoring.trend_label(1) == "크게 상승"
+    assert scoring.trend_label(3) == "보합"
+    assert scoring.trend_label(None) == "판단 불가"
+    print("[OK] 추세 라벨 방향 (5=하락, 1=상승)")
+
+
 def test_weights_sum():
     total = sum(v["weight"] for v in config.VARIABLES)
     assert total == 100, f"가중치 합이 100이 아님: {total}"
@@ -73,5 +108,7 @@ if __name__ == "__main__":
     test_level_bands()
     test_trend()
     test_composite()
+    test_history_matches_today()
+    test_trend_label()
     test_weights_sum()
     print("\n모든 테스트 통과 [PASS]")
