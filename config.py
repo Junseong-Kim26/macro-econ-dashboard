@@ -274,15 +274,19 @@ def get_variable(key):
 COMBO_CHARTS = [
     {
         "key": "market_combo",
-        "title": "미국 증시지수 & IPO ETF (콤보)",
+        "title": "미국 증시지수 & 신규상장주 ETF (콤보)",
         "left_title": "지수 (나스닥·다우)",
-        "right_title": "IPO ETF ($)",
+        "right_title": "신규상장주 ETF ($)",
         "series": [
             {"label": "나스닥 종합", "source": "fred", "id": "NASDAQCOM",
              "kind": "line", "axis": "left", "color": "#1f77b4"},
             {"label": "다우존스", "source": "fred", "id": "DJIA",
              "kind": "line", "axis": "left", "color": "#ff7f0e"},
-            {"label": "IPO ETF", "source": "yfinance", "id": "IPO",
+            # 원래 Renaissance IPO ETF("IPO")를 썼는데, 배포한 클라우드에서만
+            # 야후가 빈 응답을 준다(로컬은 정상, 다른 티커도 정상 — "IPO" 라는
+            # 흔한 단어라 티커 해석이 갈리는 것으로 보인다). 같은 미국 신규상장주
+            # 지수(IPOX-100)를 따르는 FPX 로 바꿨다. 일간수익률 상관 0.87.
+            {"label": "신규상장주 ETF (FPX)", "source": "yfinance", "id": "FPX",
              "kind": "line", "axis": "right", "color": "#2ca02c"},
         ],
     },
