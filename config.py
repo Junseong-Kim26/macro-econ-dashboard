@@ -296,6 +296,30 @@ COMBO_CHARTS = [
         ],
     },
     {
+        "key": "jgb",
+        "title": "일본 국채 금리 (10년 · 30년)",
+        "left_title": "금리 (%)",
+        # 자료: 일본 재무성(財務省) 국채금리정보, 매영업일 공표. 인증키 불필요.
+        # FRED 의 일본 국채는 월별·2개월 지연이고 30년물이 없어서 직접 받아온다.
+        "series": [
+            {"label": "일본 10년", "source": "mof", "id": "JGB10Y",
+             "mof": {"col": "10年"},
+             "kind": "line", "axis": "left", "color": "#8c564b"},
+            {"label": "일본 30년", "source": "mof", "id": "JGB30Y",
+             "mof": {"col": "30年"},
+             "kind": "line", "axis": "left", "color": "#e377c2"},
+        ],
+    },
+    {
+        "key": "usdjpy",
+        "title": "엔/달러 환율",
+        "left_title": "엔/달러 (¥)",
+        "series": [
+            {"label": "엔/달러", "source": "fred", "id": "DEXJPUS",
+             "kind": "line", "axis": "left", "color": "#17becf"},
+        ],
+    },
+    {
         "key": "yield_spread",
         "title": "미국 장단기 금리차 (10년 - 2년)",
         "left_title": "금리차 (%p)",

@@ -8,7 +8,9 @@
 - 받은 원자료는 cache/ 폴더에 parquet으로 저장해 재요청을 줄인다.
 """
 
+import io
 import os
+import re
 import datetime as dt
 
 import pandas as pd
@@ -91,6 +93,58 @@ def fetch_ecos(ecos_info, api_key, start=config.DATA_START):
     df["value"] = pd.to_numeric(df["DATA_VALUE"], errors="coerce")
     s = df.set_index("date")["value"].dropna().sort_index()
     s.name = stat + "_" + item
+    return s
+
+
+# ---------------------------------------------------------------------------
+# 일본 국채 유통수익률 (일별) — 일본 재무성 공표자료
+# ---------------------------------------------------------------------------
+# FRED 에는 일본 국채가 월별(그것도 2개월 지연)뿐이고 30년물은 아예 없다.
+# 그래서 재무성이 매영업일 올리는 CSV 를 직접 읽는다. 인증키가 필요 없다.
+MOF_BASE = "https://www.mof.go.jp/jgbs/reference/interest_rate/"
+
+# 일본 연호 → 서기 기준연도 (예: 令和(R) 8년 = 2018 + 8 = 2026)
+MOF_ERA = {"M": 1867, "T": 1911, "S": 1925, "H": 1988, "R": 2018}
+MOF_DATE = re.compile(r"^([MTSHR])(\d+)\.(\d+)\.(\d+)$")
+
+
+def _mof_date(value):
+    """'R8.8.3' 같은 연호 날짜를 서기로 바꾼다. 형식이 아니면 NaT."""
+    m = MOF_DATE.match(str(value).strip())
+    if not m:
+        return pd.NaT
+    era, year, month, day = m.groups()
+    return pd.Timestamp(MOF_ERA[era] + int(year), int(month), int(day))
+
+
+def _mof_table(url):
+    """재무성 금리 CSV 한 개를 표로 읽는다."""
+    # 연결 5초 / 응답 60초 — 전체 이력 파일이 1MB 를 넘어 넉넉히 준다
+    r = requests.get(url, timeout=(5, 60))
+    r.raise_for_status()
+    # 1행은 제목("国債金利情報"), 2행이 열이름(基準日·1年…40年). 인코딩은 Shift-JIS.
+    df = pd.read_csv(io.BytesIO(r.content), encoding="shift_jis", skiprows=1)
+    df["date"] = df["基準日"].map(_mof_date)
+    return df.dropna(subset=["date"])      # 파일 끝의 빈 줄 등을 걸러낸다
+
+
+def fetch_mof_jgb(col):
+    """일본 국채 유통수익률(일별)을 Series 로 반환. col 예: '10年', '30年'.
+
+    전체 이력 파일(1974~)은 **전월까지만** 담고 있어서, 당월 파일을 덧붙여야
+    최신 영업일까지 채워진다. 두 파일이 겹치는 날짜는 당월 것을 쓴다.
+    """
+    df = pd.concat([_mof_table(MOF_BASE + "data/jgbcm_all.csv"),
+                    _mof_table(MOF_BASE + "jgbcm.csv")])
+    df = df.drop_duplicates(subset=["date"], keep="last")
+
+    if col not in df.columns:
+        raise RuntimeError(f"재무성 자료에 '{col}' 열이 없습니다: {list(df.columns)[:6]}…")
+
+    s = pd.to_numeric(df.set_index("date")[col], errors="coerce").dropna().sort_index()
+    if s.empty:
+        raise RuntimeError(f"재무성 '{col}' 자료가 비어 있습니다")
+    s.name = col
     return s
 
 
@@ -242,16 +296,28 @@ def fetch_chart_series(spec, keys, use_cache=True, max_age_hours=12):
             raw = fetch_yfinance(spec["id"])
         elif src == "ecos":
             raw = fetch_ecos(spec["ecos"], keys.get("ecos", ""))
+        elif src == "mof":
+            raw = fetch_mof_jgb(spec["mof"]["col"])
         else:
             raise ValueError(f"알 수 없는 source: {src}")
         raw.name = spec["id"]
         raw.to_frame("value").to_parquet(path)
+        # 국내·일본 관공서 사이트는 해외 클라우드에서 막힐 수 있어 보관해 둔다
+        if src in ("ecos", "mof"):
+            mirror_save(f"chart_{spec['id']}", raw)
         return raw, None
     except Exception as e:  # noqa: BLE001
         if os.path.exists(path):
             s = pd.read_parquet(path)["value"]
             s.name = spec["id"]
             return s, f"{spec['label']}: 최신 조회 실패, 캐시 사용 ({e})"
+        # 로컬 캐시도 없으면(클라우드 첫 실행) Dropbox 보관본으로 대체
+        m = mirror_load(f"chart_{spec['id']}")
+        if m is not None:
+            m = m.rename(spec["id"])
+            last = m.index.max().strftime("%Y-%m-%d")
+            return m, (f"{spec['label']}: 원본 조회 실패 → Dropbox 보관본 사용 "
+                       f"(자료 최종일 {last})")
         # 빈 결과도 날짜 인덱스를 갖게 해서 이후 날짜 비교가 깨지지 않도록 한다
         empty = pd.Series(dtype="float64", name=spec["id"],
                           index=pd.DatetimeIndex([], name="date"))
