@@ -114,6 +114,42 @@ def _pick_amount(rows, account_names, prefer_fs="CFS"):
     return None
 
 
+def _fetch_batch(batch, key, year, reprt_code, timeout, skipped):
+    """회사 묶음 하나를 조회해 레코드 리스트를 돌려준다.
+
+    DART 는 묶음이 커서 응답이 커지면 JSON 대신 **HTML 오류 페이지**를 준다.
+    (100개는 실패하는데 50개로 쪼개면 되는 묶음이 실제로 있었다. 같은 묶음을
+     그대로 다시 불러도 계속 실패하므로, 재시도가 아니라 절반으로 쪼개야 한다.)
+    그래서 JSON 이 아니면 묶음을 반으로 나눠 다시 부른다.
+    끝까지(1개까지) 안 되면 그 회사만 건너뛰고 skipped 에 적어 둔다 —
+    회사 하나 때문에 전체 수집이 무너지지 않게.
+    """
+    params = {
+        "crtfc_key": key,
+        "corp_code": ",".join(batch),
+        "bsns_year": str(year),
+        "reprt_code": reprt_code,
+    }
+    r = _get(f"{BASE}/fnlttMultiAcnt.json", params, timeout=(10, timeout))
+    r.raise_for_status()
+
+    if "json" not in r.headers.get("Content-Type", "").lower():
+        if len(batch) == 1:
+            skipped.append(batch[0])
+            return []
+        mid = len(batch) // 2
+        return (_fetch_batch(batch[:mid], key, year, reprt_code, timeout, skipped)
+                + _fetch_batch(batch[mid:], key, year, reprt_code, timeout, skipped))
+
+    js = r.json()
+    status = js.get("status")
+    if status == "013":       # 조회 데이터 없음
+        return []
+    if status not in ("000", None):
+        raise RuntimeError(f"DART 오류 {status}: {js.get('message')}")
+    return js.get("list", [])
+
+
 def fetch_financials(corp_codes, year, reprt_code, key=None,
                      batch_size=100, timeout=60, progress=None):
     """다중회사 주요계정 조회.
@@ -126,30 +162,16 @@ def fetch_financials(corp_codes, year, reprt_code, key=None,
         raise ValueError("DART_API_KEY 가 없습니다.")
 
     records = {}
+    skipped = []
     total = len(corp_codes)
+    done = 0
     for i in range(0, total, batch_size):
         batch = corp_codes[i:i + batch_size]
-        params = {
-            "crtfc_key": key,
-            "corp_code": ",".join(batch),
-            "bsns_year": str(year),
-            "reprt_code": reprt_code,
-        }
-        r = _get(f"{BASE}/fnlttMultiAcnt.json", params, timeout=(10, timeout))
-        r.raise_for_status()
-        js = r.json()
-
-        status = js.get("status")
-        if status == "013":       # 조회 데이터 없음
-            pass
-        elif status not in ("000", None):
-            raise RuntimeError(f"DART 오류 {status}: {js.get('message')}")
-
-        for row in js.get("list", []):
+        for row in _fetch_batch(batch, key, year, reprt_code, timeout, skipped):
             records.setdefault(row.get("corp_code"), []).append(row)
-
+        done = min(i + batch_size, total)
         if progress:
-            progress(min(i + batch_size, total), total)
+            progress(done, total)
 
     out = []
     for corp, rows in records.items():
@@ -157,7 +179,10 @@ def fetch_financials(corp_codes, year, reprt_code, key=None,
         pf = _pick_amount(rows, PROFIT_NAMES)
         out.append({"corp_code": corp, "자본총계": eq, "당기순이익": pf})
 
-    return pd.DataFrame(out)
+    df = pd.DataFrame(out)
+    # 건너뛴 회사가 있으면 조용히 넘어가지 않도록 표에 붙여 둔다
+    df.attrs["skipped"] = skipped
+    return df
 
 
 def annualize_profit(profit, reprt_code):
