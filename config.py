@@ -71,7 +71,7 @@ VARIABLES = [
         "unit": "%",
         "decimals": 2,
         "transform": None,
-        "weight": 15,
+        "weight": 25,
         "trend_type": "rate",
         "level_bands": [
             (-INF, 2.0, 5),
@@ -89,7 +89,7 @@ VARIABLES = [
         "unit": "%",
         "decimals": 2,
         "transform": None,
-        "weight": 8,
+        "weight": 15,
         "trend_type": "rate",
         "level_bands": [
             (-INF, 2.5, 5),
@@ -109,7 +109,7 @@ VARIABLES = [
         "unit": "%",
         "decimals": 2,
         "transform": None,
-        "weight": 6,
+        "weight": 5,
         "trend_type": "rate",
         "level_bands": [
             (-INF, 2.5, 5),
@@ -127,7 +127,7 @@ VARIABLES = [
         "unit": "$",
         "decimals": 2,
         "transform": None,
-        "weight": 10,
+        "weight": 8,
         "trend_type": "wti",
         # U자형: 완만한 중간대(40~60$)가 최고점, 너무 낮으면(<40$) 수요둔화로 3점
         "level_bands": [
@@ -146,7 +146,7 @@ VARIABLES = [
         "unit": "%",
         "decimals": 2,
         "transform": "yoy",
-        "weight": 12,
+        "weight": 9,
         "trend_type": "inflation",
         "level_bands": [
             (-INF, 2.0, 5),
@@ -165,7 +165,7 @@ VARIABLES = [
         "unit": "%",
         "decimals": 2,
         "transform": "yoy",
-        "weight": 8,
+        "weight": 6,
         "trend_type": "inflation",
         "level_bands": [
             (-INF, 1.0, 5),
@@ -183,7 +183,7 @@ VARIABLES = [
         "unit": "%",
         "decimals": 2,
         "transform": None,
-        "weight": 12,
+        "weight": 9,
         "trend_type": "delinquency",
         "level_bands": [
             (-INF, 2.0, 5),
@@ -201,7 +201,7 @@ VARIABLES = [
         "unit": "",
         "decimals": 2,
         "transform": None,
-        "weight": 12,
+        "weight": 9,
         "trend_type": "vix",
         # 낮을수록(안정) 우호. 20 넘으면 불안, 35 넘으면 공포.
         "level_bands": [
@@ -221,7 +221,7 @@ VARIABLES = [
         "unit": "",
         "decimals": 2,
         "transform": None,
-        "weight": 7,
+        "weight": 6,
         "trend_type": "dollar",
         "level_bands": [
             (-INF, 100, 5),
@@ -239,7 +239,7 @@ VARIABLES = [
         "unit": "%",
         "decimals": 2,
         "transform": None,
-        "weight": 10,
+        "weight": 8,
         "trend_type": "unemp",
         # 낮을수록/내려갈수록 우호(경기 견조). 상승은 침체 위험 신호.
         "level_bands": [
